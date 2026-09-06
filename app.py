@@ -1,6 +1,8 @@
 import json
 import os
 import hmac
+import hashlib
+import base64
 import shutil
 import subprocess
 import tempfile
@@ -49,6 +51,7 @@ def default_state():
         "stop_requested_at": None,
         "auto_stop_at": None,
         "generation": 0,
+        "error_logs_fetched_generation": None,
     }
 
 
@@ -107,14 +110,74 @@ def dashboard_auth_required(fn):
     return wrapper
 
 
+def _control_secret():
+    value = os.getenv("CONTROL_SECRET", "").strip()
+    if not value:
+        raise RuntimeError("CONTROL_SECRET is missing on the controller.")
+    return value
+
+
+def _sign_value(value):
+    return hmac.new(_control_secret().encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def make_bootstrap_token(generation):
+    issued = int(time.time())
+    body = f"{int(generation)}:{issued}"
+    sig = _sign_value("bootstrap:" + body)
+    raw = f"{body}:{sig}".encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def validate_bootstrap_token(token, generation, max_age=1800):
+    try:
+        padded = str(token) + "=" * (-len(str(token)) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        gen_text, issued_text, sig = raw.split(":", 2)
+        gen = int(gen_text)
+        issued = int(issued_text)
+        if gen != int(generation):
+            return False
+        if abs(time.time() - issued) > max_age:
+            return False
+        expected = _sign_value(f"bootstrap:{gen}:{issued}")
+        return hmac.compare_digest(sig, expected)
+    except Exception:
+        return False
+
+
+def run_secret_for(generation):
+    return _sign_value(f"run:{int(generation)}")
+
+
 def verify_worker_secret():
-    expected = os.getenv("CONTROL_SECRET", "")
-    provided = request.headers.get("X-Control-Secret", "")
-    if not provided:
-        provided = request.args.get("secret", "")
-    if not provided and request.is_json:
-        provided = (request.get_json(silent=True) or {}).get("secret", "")
-    return bool(expected) and hmac.compare_digest(str(provided), str(expected))
+    provided = request.headers.get("X-Run-Secret", "")
+    generation = request.headers.get("X-Run-Generation", "")
+    try:
+        generation = int(generation)
+    except Exception:
+        return False
+    expected = run_secret_for(generation)
+    if not provided or not hmac.compare_digest(str(provided), str(expected)):
+        return False
+    with STATE_LOCK:
+        return generation == int(STATE.get("generation") or 0)
+
+
+def runtime_config_from_env():
+    required = ["GITHUB_TOKEN", "API_ID", "API_HASH", "BOT_TOKEN", "ALLOWED_USER_ID"]
+    optional = ["OPENAI_API_KEY", "ADMIN_IDS", "CHANNEL_MAP", "LEECH_URL"]
+    config = {}
+    missing = []
+    for key in required + optional:
+        value = os.getenv(key, "").strip()
+        if value:
+            config[key] = value
+        elif key in required:
+            missing.append(key)
+    if missing:
+        raise RuntimeError("Missing Render runtime credentials: " + ", ".join(missing))
+    return config
 
 
 def kaggle_env():
@@ -145,13 +208,24 @@ def kernel_ref():
     return ref
 
 
-def prepare_worker_directory():
+def prepare_worker_directory(generation):
     ref = kernel_ref()
     title = os.getenv("KAGGLE_KERNEL_TITLE", "Subtitle Bot Controller Worker").strip()
     accelerator = os.getenv("KAGGLE_ACCELERATOR", "").strip()
 
+    public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if not public_base_url.startswith("https://"):
+        raise RuntimeError("PUBLIC_BASE_URL must be the HTTPS Render URL, e.g. https://your-service.onrender.com")
+
+    # Validate all runtime credentials before spending GPU quota. Values are never logged.
+    runtime_config_from_env()
+
     workdir = Path(tempfile.mkdtemp(prefix="subtitle-kaggle-worker-"))
-    shutil.copy2(WORKER_SOURCE, workdir / "worker.py")
+    worker_text = WORKER_SOURCE.read_text(encoding="utf-8")
+    worker_text = worker_text.replace("__CONTROLLER_URL_JSON__", json.dumps(public_base_url))
+    worker_text = worker_text.replace("__BOOTSTRAP_TOKEN_JSON__", json.dumps(make_bootstrap_token(generation)))
+    worker_text = worker_text.replace("__RUN_GENERATION_JSON__", json.dumps(int(generation)))
+    (workdir / "worker.py").write_text(worker_text, encoding="utf-8")
 
     metadata = {
         "id": ref,
@@ -231,11 +305,15 @@ def poll_kaggle_status(generation):
                 ["kaggle", "kernels", "status", kernel_ref()], timeout=45
             )
             status = parse_kaggle_status(output)
+            fetch_error_logs = False
             with STATE_LOCK:
                 STATE["kaggle_status"] = status if rc == 0 else "status_error"
                 if status == "error" and phase not in {"offline", "stopping"}:
                     STATE["phase"] = "error"
-                    STATE["message"] = "Kaggle worker run failed. Check logs."
+                    STATE["message"] = "Kaggle worker run failed. Fetching Kaggle traceback..."
+                    if STATE.get("error_logs_fetched_generation") != generation:
+                        STATE["error_logs_fetched_generation"] = generation
+                        fetch_error_logs = True
                 elif status == "complete":
                     if desired == "stopped":
                         STATE["phase"] = "offline"
@@ -244,6 +322,13 @@ def poll_kaggle_status(generation):
                         STATE["phase"] = "offline"
                         STATE["message"] = "Kaggle run finished before the bot became live."
                 save_state()
+
+            if fetch_error_logs:
+                append_controller_log("Kaggle reported ERROR; fetching the kernel traceback...")
+                try:
+                    run_cli(["kaggle", "kernels", "logs", kernel_ref()], timeout=90)
+                except Exception as exc:
+                    append_controller_log(f"Could not fetch Kaggle error log: {exc}")
         except Exception as exc:
             append_controller_log(f"Status check warning: {exc}")
 
@@ -262,7 +347,7 @@ def submit_kaggle_job(generation):
     worker_dir = None
     try:
         append_controller_log("Preparing Kaggle worker package...")
-        worker_dir, accelerator = prepare_worker_directory()
+        worker_dir, accelerator = prepare_worker_directory(generation)
 
         command = ["kaggle", "kernels", "push", "-p", str(worker_dir)]
         if accelerator:
@@ -442,6 +527,38 @@ def api_stop():
         save_state()
     append_controller_log("STOP requested from dashboard. Worker will terminate the bot and exit the Kaggle run.")
     return jsonify({"ok": True, "message": "Stop command accepted."})
+
+
+@app.route("/api/worker/bootstrap", methods=["POST"])
+def worker_bootstrap():
+    data = request.get_json(silent=True) or {}
+    try:
+        generation = int(data.get("generation"))
+    except Exception:
+        return jsonify({"ok": False, "error": "Invalid generation"}), 400
+
+    token = request.headers.get("X-Bootstrap-Token", "")
+    with STATE_LOCK:
+        current_generation = int(STATE.get("generation") or 0)
+        desired = STATE.get("desired_state")
+    if generation != current_generation or desired != "running":
+        return jsonify({"ok": False, "error": "This run is no longer active"}), 409
+    if not validate_bootstrap_token(token, generation):
+        return jsonify({"ok": False, "error": "Invalid or expired bootstrap token"}), 403
+
+    try:
+        config = runtime_config_from_env()
+    except Exception as exc:
+        append_controller_log(f"BOOTSTRAP CONFIG ERROR: {exc}")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    append_controller_log(f"Kaggle worker bootstrap connected for generation {generation}.")
+    return jsonify({
+        "ok": True,
+        "run_secret": run_secret_for(generation),
+        "config": config,
+        "server_time": utc_now_iso(),
+    })
 
 
 @app.route("/api/worker/command")

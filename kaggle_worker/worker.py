@@ -1,18 +1,10 @@
 """
 Kaggle worker for the Subtitle_Gen Telegram bot.
 
-This script mirrors the user's working Kaggle notebook flow:
-- verify GPUs
-- clone VkTheEncoder/Subtitle_Gen from private GitHub
-- load Kaggle Secrets
-- install aria2 + Python 3.10 venv
-- install PaddlePaddle GPU + requirements
-- clear old bot/OCR processes + PaddleOCR cache
-- warm up PaddleOCR on GPU 0
-- validate GPU 1
-- start main.py
-- heartbeat to the controller
-- stop cleanly when the controller says STOP
+IMPORTANT: API-triggered `kaggle kernels push` runs do not reliably inherit
+Kaggle UI User Secrets. Therefore this worker does NOT depend on kaggle_secrets.
+It receives a short-lived bootstrap token embedded by the Render controller,
+then securely fetches the runtime credentials from the controller over HTTPS.
 """
 
 import gc
@@ -23,11 +15,8 @@ import signal
 import subprocess
 import sys
 import time
-import urllib.parse
 import urllib.request
 from pathlib import Path
-
-from kaggle_secrets import UserSecretsClient
 
 REPO_OWNER = "VkTheEncoder"
 REPO_NAME = "Subtitle_Gen"
@@ -40,42 +29,76 @@ PADDLE_CACHE = Path.home() / ".paddleocr"
 POLL_SECONDS = 5
 HEARTBEAT_SECONDS = 10
 
-secrets_client = UserSecretsClient()
+# Replaced by the controller immediately before `kaggle kernels push`.
+CONTROLLER_URL = __CONTROLLER_URL_JSON__.rstrip("/")
+BOOTSTRAP_TOKEN = __BOOTSTRAP_TOKEN_JSON__
+RUN_GENERATION = __RUN_GENERATION_JSON__
 
-
-def secret(name, required=False, default=None):
-    try:
-        value = secrets_client.get_secret(name)
-    except Exception:
-        value = None
-    if value is not None:
-        value = str(value).strip()
-    if value:
-        return value
-    if required:
-        raise RuntimeError(f"Required Kaggle Secret '{name}' is missing or not enabled for this notebook.")
-    return default
-
-
-CONTROLLER_URL = secret("CONTROLLER_URL", required=True).rstrip("/")
-CONTROL_SECRET = secret("CONTROL_SECRET", required=True)
+RUN_SECRET = ""
+RUNTIME_CONFIG = {}
 
 
 class StopRequested(Exception):
     pass
 
 
-def http_json(method, path, payload=None, timeout=8):
+def raw_http_json(method, path, payload=None, headers=None, timeout=20):
     url = CONTROLLER_URL + path
     data = None
-    headers = {"X-Control-Secret": CONTROL_SECRET}
+    req_headers = dict(headers or {})
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        req_headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = resp.read().decode("utf-8", errors="replace")
         return json.loads(body) if body else {}
+
+
+def bootstrap_from_controller():
+    global RUN_SECRET, RUNTIME_CONFIG
+    result = raw_http_json(
+        "POST",
+        "/api/worker/bootstrap",
+        payload={"generation": RUN_GENERATION},
+        headers={"X-Bootstrap-Token": BOOTSTRAP_TOKEN},
+        timeout=30,
+    )
+    if not result.get("ok"):
+        raise RuntimeError("Controller bootstrap rejected the Kaggle worker.")
+    RUN_SECRET = str(result.get("run_secret") or "").strip()
+    config = result.get("config") or {}
+    if not RUN_SECRET:
+        raise RuntimeError("Controller bootstrap did not provide a run secret.")
+    if not isinstance(config, dict):
+        raise RuntimeError("Controller bootstrap returned an invalid runtime config.")
+    RUNTIME_CONFIG = {str(k): str(v) for k, v in config.items() if v is not None}
+
+
+def http_json(method, path, payload=None, timeout=8):
+    if not RUN_SECRET:
+        raise RuntimeError("Worker has not completed controller bootstrap.")
+    return raw_http_json(
+        method,
+        path,
+        payload=payload,
+        headers={
+            "X-Run-Secret": RUN_SECRET,
+            "X-Run-Generation": str(RUN_GENERATION),
+        },
+        timeout=timeout,
+    )
+
+
+def runtime_secret(name, required=False, default=None):
+    value = RUNTIME_CONFIG.get(name)
+    if value is not None:
+        value = str(value).strip()
+    if value:
+        return value
+    if required:
+        raise RuntimeError(f"Required runtime credential '{name}' was not supplied by the controller.")
+    return default
 
 
 def command_state():
@@ -84,7 +107,6 @@ def command_state():
         return result.get("desired_state", "running")
     except Exception as exc:
         print(f"Controller command check warning: {exc}", flush=True)
-        # Fail-open: a brief controller/network interruption should not kill the bot.
         return "running"
 
 
@@ -106,6 +128,7 @@ def tail_file(path, max_lines=80, max_chars=12000):
 
 def heartbeat(stage, status="starting", message="", gpu_count=None, gpu_names=None, bot_pid=None, runtime_seconds=None, log_path=None):
     payload = {
+        "generation": RUN_GENERATION,
         "stage": stage,
         "status": status,
         "message": message,
@@ -187,15 +210,14 @@ def load_bot_secrets_into_environment():
     optional = ["OPENAI_API_KEY", "ADMIN_IDS", "CHANNEL_MAP", "LEECH_URL"]
     missing = []
     for key in required + optional:
-        value = secret(key, required=False)
+        value = runtime_secret(key, required=False)
         if value:
             os.environ[key] = value
         elif key in required:
             missing.append(key)
     if missing:
-        raise RuntimeError("Missing required Kaggle Secrets: " + ", ".join(missing))
+        raise RuntimeError("Missing required runtime credentials: " + ", ".join(missing))
 
-    # Same stable settings used in the uploaded notebook.
     os.environ.setdefault("OCR_WORKERS", "2")
     os.environ.setdefault("ENCODE_CONCURRENCY", "2")
     os.environ.setdefault("OCR_SCAN_WIDTH", "1280")
@@ -203,7 +225,7 @@ def load_bot_secrets_into_environment():
 
 
 def clone_repository():
-    github_token = secret("GITHUB_TOKEN", required=True)
+    github_token = runtime_secret("GITHUB_TOKEN", required=True)
     clone_url = f"https://{REPO_OWNER}:{github_token}@github.com/{REPO_OWNER}/{REPO_NAME}.git"
     if REPO_PATH.exists():
         shutil.rmtree(REPO_PATH, ignore_errors=True)
@@ -313,11 +335,10 @@ def verify_ffmpeg():
 def start_bot(gpu_count, gpu_names):
     BOT_LOG.parent.mkdir(parents=True, exist_ok=True)
     bot_env = os.environ.copy()
-    # Re-read required credentials exactly before launch, matching the notebook's final cell behavior.
     for key in ["API_ID", "API_HASH", "BOT_TOKEN", "ALLOWED_USER_ID"]:
-        bot_env[key] = secret(key, required=True)
+        bot_env[key] = runtime_secret(key, required=True)
     for key in ["OPENAI_API_KEY", "CHANNEL_MAP", "LEECH_URL", "ADMIN_IDS"]:
-        value = secret(key, required=False)
+        value = runtime_secret(key, required=False)
         if value:
             bot_env[key] = value
     bot_env["OCR_WORKERS"] = "2"
@@ -405,7 +426,10 @@ def main():
     gpu_count = 0
     gpu_names = []
     try:
-        heartbeat("boot", "starting", "Kaggle worker started. Checking GPU...")
+        # This is deliberately first. It replaces the broken dependency on
+        # Kaggle UI secrets for API-pushed versions.
+        bootstrap_from_controller()
+        heartbeat("boot", "starting", "Kaggle worker connected to controller. Checking GPU...")
         check_stop()
 
         subprocess.run(["python", "--version"], check=False)
@@ -419,15 +443,14 @@ def main():
             gpu_names=gpu_names,
         )
 
-        # Your original notebook explicitly uses GPU 0 and GPU 1.
         if gpu_count < 2:
             raise RuntimeError(
                 "This bot setup expects 2 GPUs because the working notebook uses PaddleOCR on GPU 0 and GPU 1. "
-                "Open the dedicated Kaggle worker once and select the same GPU T4 x2 accelerator, then start again."
+                "Set KAGGLE_ACCELERATOR=NvidiaTeslaT4 so Kaggle allocates T4 x2."
             )
 
         check_stop()
-        heartbeat("secrets", "starting", "Loading Kaggle bot secrets...")
+        heartbeat("credentials", "starting", "Runtime credentials received securely from controller.")
         load_bot_secrets_into_environment()
 
         check_stop()
@@ -452,25 +475,27 @@ def main():
         return start_bot(gpu_count, gpu_names)
 
     except StopRequested as exc:
-        heartbeat(
-            "stopped",
-            "stopped",
-            str(exc),
-            gpu_count=gpu_count,
-            gpu_names=gpu_names,
-            log_path=STAGE_LOG,
-        )
+        if RUN_SECRET:
+            heartbeat(
+                "stopped",
+                "stopped",
+                str(exc),
+                gpu_count=gpu_count,
+                gpu_names=gpu_names,
+                log_path=STAGE_LOG,
+            )
         print(str(exc), flush=True)
         return 0
     except Exception as exc:
-        heartbeat(
-            "error",
-            "error",
-            str(exc),
-            gpu_count=gpu_count,
-            gpu_names=gpu_names,
-            log_path=BOT_LOG if BOT_LOG.exists() else STAGE_LOG,
-        )
+        if RUN_SECRET:
+            heartbeat(
+                "error",
+                "error",
+                str(exc),
+                gpu_count=gpu_count,
+                gpu_names=gpu_names,
+                log_path=BOT_LOG if BOT_LOG.exists() else STAGE_LOG,
+            )
         print(f"FATAL: {exc}", file=sys.stderr, flush=True)
         raise
 
