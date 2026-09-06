@@ -1,0 +1,5 @@
+Project: Kaggle On-Demand Subtitle Telegram Bot Controller
+Based on uploaded notebook: subtitle-gen-bot-setup.ipynb
+Bot repo used by notebook: VkTheEncoder/Subtitle_Gen
+Controller: Flask + Kaggle CLI
+Worker: Kaggle private GPU script kernel

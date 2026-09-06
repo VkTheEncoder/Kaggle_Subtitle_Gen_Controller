@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subtitle Bot Control</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">KAGGLE GPU CONTROLLER</div>
+        <h1>Subtitle Gen Bot</h1>
+      </div>
+      <form method="post" action="/logout"><button class="ghost" type="submit">Logout</button></form>
+    </header>
+
+    <section class="hero-grid">
+      <article class="status-card">
+        <div class="status-row">
+          <span id="statusDot" class="dot offline"></span>
+          <div>
+            <div id="phaseLabel" class="phase">OFFLINE</div>
+            <div id="message" class="message">Loading status...</div>
+          </div>
+        </div>
+        <div class="meta-grid">
+          <div><span>Kaggle</span><strong id="kaggleStatus">—</strong></div>
+          <div><span>Worker stage</span><strong id="workerStage">—</strong></div>
+          <div><span>GPUs</span><strong id="gpuInfo">—</strong></div>
+          <div><span>Runtime</span><strong id="runtime">—</strong></div>
+          <div><span>Heartbeat</span><strong id="heartbeat">—</strong></div>
+          <div><span>Kernel</span><strong id="kernelRef">—</strong></div>
+        </div>
+      </article>
+
+      <article class="control-card">
+        <label class="select-label" for="autoStop">Safety auto-stop</label>
+        <select id="autoStop">
+          <option value="30">30 minutes</option>
+          <option value="60">1 hour</option>
+          <option value="120" selected>2 hours</option>
+          <option value="180">3 hours</option>
+          <option value="0">Disabled</option>
+        </select>
+        <div id="autoStopText" class="countdown">No active timer</div>
+        <div class="button-grid">
+          <button id="startBtn" class="primary big" type="button">▶ Start Bot</button>
+          <button id="stopBtn" class="danger big" type="button">■ Stop Bot</button>
+        </div>
+        <p class="hint">STOP tells the Kaggle worker to kill <code>main.py</code> and exit the run, releasing the GPU session.</p>
+      </article>
+    </section>
+
+    <section class="log-grid">
+      <article class="log-card">
+        <div class="card-head"><h2>Worker / Bot Log</h2><span>Latest tail</span></div>
+        <pre id="workerLog">Waiting for worker...</pre>
+      </article>
+      <article class="log-card">
+        <div class="card-head"><h2>Controller Log</h2><span>Kaggle launch/status</span></div>
+        <pre id="controllerLog">Ready.</pre>
+      </article>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </main>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

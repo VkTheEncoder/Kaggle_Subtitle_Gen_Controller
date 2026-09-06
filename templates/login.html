@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subtitle Bot Control - Login</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="login-page">
+  <main class="login-card">
+    <div class="brand-mark">SB</div>
+    <h1>Subtitle Bot Control</h1>
+    <p class="muted">Private Kaggle GPU controller</p>
+    {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+    <form method="post" class="login-form">
+      <label>Username<input name="username" autocomplete="username" required></label>
+      <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
+      <button class="primary" type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>
