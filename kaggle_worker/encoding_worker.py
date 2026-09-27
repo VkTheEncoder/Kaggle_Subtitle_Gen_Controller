@@ -1,13 +1,11 @@
-"""
-Kaggle worker for the Subtitle_Gen Telegram bot.
+"""Kaggle worker for the Queue3-GPU Telegram encoding bot.
 
-IMPORTANT: API-triggered `kaggle kernels push` runs do not reliably inherit
-Kaggle UI User Secrets. Therefore this worker does NOT depend on kaggle_secrets.
-It receives a short-lived bootstrap token embedded by the Render controller,
-then securely fetches the runtime credentials from the controller over HTTPS.
+This reproduces the uploaded encoding notebook without requiring manual Kaggle
+cell execution: clone repo -> install requirements -> run muxbot.py.
+The Render controller supplies only the GitHub token required to clone the
+private repository; the bot's own config.py remains inside that private repo.
 """
 
-import gc
 import json
 import os
 import shutil
@@ -18,18 +16,15 @@ import time
 import urllib.request
 from pathlib import Path
 
-REPO_OWNER = "VkTheEncoder"
-REPO_NAME = "Subtitle_Gen"
+REPO_OWNER = __REPO_OWNER_JSON__
+REPO_NAME = __REPO_NAME_JSON__
+ENTRYPOINT = __ENTRYPOINT_JSON__
 REPO_PATH = Path(f"/kaggle/working/{REPO_NAME}")
-VENV_PATH = Path("/kaggle/working/frbot-venv")
-PYTHON_BIN = VENV_PATH / "bin" / "python"
-BOT_LOG = Path("/kaggle/working/frbot.log")
-STAGE_LOG = Path("/kaggle/working/controller-stage.log")
-PADDLE_CACHE = Path.home() / ".paddleocr"
+BOT_LOG = Path("/kaggle/working/encoding-bot.log")
+STAGE_LOG = Path("/kaggle/working/encoding-controller-stage.log")
 POLL_SECONDS = 5
 HEARTBEAT_SECONDS = 10
 
-# Replaced by the controller immediately before `kaggle kernels push`.
 CONTROLLER_URL = __CONTROLLER_URL_JSON__.rstrip("/")
 BOOTSTRAP_TOKEN = __BOOTSTRAP_TOKEN_JSON__
 RUN_GENERATION = __RUN_GENERATION_JSON__
@@ -98,7 +93,7 @@ def runtime_secret(name, required=False, default=None):
     if value:
         return value
     if required:
-        raise RuntimeError(f"Required runtime credential '{name}' was not supplied by the controller.")
+        raise RuntimeError(f"Required runtime credential '{name}' was not supplied by controller.")
     return default
 
 
@@ -113,23 +108,20 @@ def command_state():
 
 def check_stop():
     if command_state() == "stopped":
-        raise StopRequested("Stop requested from control website.")
+        raise StopRequested("Stop requested from controller.")
 
 
 def tail_file(path, max_lines=80, max_chars=12000):
     try:
-        if not Path(path).exists():
-            return ""
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
-        lines = text.splitlines()[-max_lines:]
-        return "\n".join(lines)[-max_chars:]
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(lines[-max_lines:])[-max_chars:]
     except Exception:
         return ""
 
 
-def heartbeat(stage, status="starting", message="", gpu_count=None, gpu_names=None, bot_pid=None, runtime_seconds=None, log_path=None):
+def heartbeat(stage, status="starting", message="", gpu_count=None, gpu_names=None,
+              bot_pid=None, runtime_seconds=None, log_path=None):
     payload = {
-        "generation": RUN_GENERATION,
         "stage": stage,
         "status": status,
         "message": message,
@@ -137,30 +129,35 @@ def heartbeat(stage, status="starting", message="", gpu_count=None, gpu_names=No
         "gpu_names": gpu_names or [],
         "bot_pid": bot_pid,
         "runtime_seconds": runtime_seconds,
-        "log_tail": tail_file(log_path or STAGE_LOG),
+        "log_tail": tail_file(log_path) if log_path else "",
     }
     try:
-        http_json("POST", f"/api/worker/{BOT_ID}/heartbeat", payload)
+        http_json("POST", f"/api/worker/{BOT_ID}/heartbeat", payload=payload)
     except Exception as exc:
         print(f"Heartbeat warning: {exc}", flush=True)
 
 
 def terminate_process_group(proc, grace=15):
-    if proc is None or proc.poll() is not None:
+    if not proc or proc.poll() is not None:
         return
     try:
         os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=grace)
-        return
-    except Exception:
-        pass
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
     except Exception:
         try:
-            proc.kill()
+            proc.terminate()
         except Exception:
-            pass
+            return
+    deadline = time.time() + grace
+    while proc.poll() is None and time.time() < deadline:
+        time.sleep(0.5)
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
 
 def run_controlled(command, stage, message, cwd=None, env=None, shell=False, check=True):
@@ -206,25 +203,6 @@ def detect_gpus():
     return len(names), names
 
 
-def load_bot_secrets_into_environment():
-    required = ["API_ID", "API_HASH", "BOT_TOKEN", "ALLOWED_USER_ID"]
-    optional = ["OPENAI_API_KEY", "ADMIN_IDS", "CHANNEL_MAP", "LEECH_URL"]
-    missing = []
-    for key in required + optional:
-        value = runtime_secret(key, required=False)
-        if value:
-            os.environ[key] = value
-        elif key in required:
-            missing.append(key)
-    if missing:
-        raise RuntimeError("Missing required runtime credentials: " + ", ".join(missing))
-
-    os.environ.setdefault("OCR_WORKERS", "2")
-    os.environ.setdefault("ENCODE_CONCURRENCY", "2")
-    os.environ.setdefault("OCR_SCAN_WIDTH", "1280")
-    os.environ.setdefault("FRBOT_BASE_DIR", "/kaggle/working/frbot")
-
-
 def clone_repository():
     github_token = runtime_secret("GITHUB_TOKEN", required=True)
     clone_url = f"https://{REPO_OWNER}:{github_token}@github.com/{REPO_OWNER}/{REPO_NAME}.git"
@@ -238,119 +216,50 @@ def clone_repository():
 
 
 def install_dependencies():
+    requirements = REPO_PATH / "requirements.txt"
+    if not requirements.exists():
+        raise RuntimeError(f"requirements.txt not found in {REPO_OWNER}/{REPO_NAME}.")
     run_controlled(
-        "apt-get update -qq && apt-get install -y -qq aria2 python3.10-venv",
-        "system_dependencies",
-        "Installing aria2 and Python 3.10 venv support...",
-        shell=True,
+        [sys.executable, "-m", "pip", "install", "-r", str(requirements)],
+        "install_requirements",
+        "Installing Encoding Bot requirements...",
+        cwd=REPO_PATH,
     )
-    if not PYTHON_BIN.exists():
-        run_controlled(
-            ["python3.10", "-m", "venv", str(VENV_PATH)],
-            "create_venv",
-            "Creating Python 3.10 virtual environment...",
+
+
+def verify_runtime(gpu_count, gpu_names):
+    if gpu_count < 1:
+        raise RuntimeError(
+            "No NVIDIA GPU was allocated. Open the dedicated Encoding worker kernel once and set its accelerator to GPU T4 x2."
         )
-
-    commands = [
-        [str(PYTHON_BIN), "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools<81"],
-        [
-            str(PYTHON_BIN),
-            "-m",
-            "pip",
-            "install",
-            "paddlepaddle-gpu==2.6.1.post120",
-            "-f",
-            "https://www.paddlepaddle.org.cn/whl/linux/mkl/avx/stable.html",
-        ],
-        [str(PYTHON_BIN), "-m", "pip", "install", "-r", "requirements.txt"],
-    ]
-    labels = ["pip_bootstrap", "paddle_install", "repo_requirements"]
-    messages = [
-        "Updating pip/wheel/setuptools...",
-        "Installing PaddlePaddle GPU...",
-        "Installing Subtitle_Gen requirements...",
-    ]
-    for command, label, message in zip(commands, labels, messages):
-        run_controlled(command, label, message, cwd=REPO_PATH)
-
-
-def clean_previous_state():
-    subprocess.run(
-        "pkill -f '/kaggle/working/frbot-venv/bin/python.*main.py'",
+    run_controlled(
+        "nvidia-smi; ffmpeg -hide_banner -encoders 2>/dev/null | grep -E 'hevc_nvenc|h264_nvenc' || true",
+        "gpu_ffmpeg_check",
+        f"Detected {gpu_count} GPU(s). Checking FFmpeg/NVENC support...",
         shell=True,
         check=False,
     )
-    subprocess.run("pkill -f 'multiprocessing.spawn'", shell=True, check=False)
-    shutil.rmtree(PADDLE_CACHE, ignore_errors=True)
-    heartbeat("cleanup", "starting", "Old bot/OCR processes stopped and PaddleOCR cache cleared.")
-
-
-def warmup_gpu0():
-    warmup_code = r'''
-import gc
-import numpy as np
-import cv2
-from paddleocr import PaddleOCR
-image = np.full((180, 800, 3), 255, dtype=np.uint8)
-cv2.putText(image, "PADDLE OCR TEST", (20, 115), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 4)
-print("Downloading and validating PaddleOCR models on GPU 0...")
-ocr = PaddleOCR(use_angle_cls=False, lang="ch", use_gpu=True, gpu_id=0, show_log=True, det_db_box_thresh=0.5, rec_batch_num=32, cpu_threads=2)
-ocr.ocr(image, cls=False)
-print("GPU 0 PaddleOCR warm-up passed.")
-del ocr
-gc.collect()
-'''
-    run_controlled(
-        [str(PYTHON_BIN), "-c", warmup_code],
-        "paddle_gpu0",
-        "Downloading/validating PaddleOCR models on GPU 0...",
-    )
-
-
-def test_gpu1():
-    gpu1_test = r'''
-import numpy as np
-from paddleocr import PaddleOCR
-image = np.full((100, 500, 3), 255, dtype=np.uint8)
-print("Loading existing models on GPU 1...")
-ocr = PaddleOCR(use_angle_cls=False, lang="ch", use_gpu=True, gpu_id=1, show_log=True, det_db_box_thresh=0.5, rec_batch_num=32, cpu_threads=2)
-ocr.ocr(image, cls=False)
-print("GPU 1 PaddleOCR test passed.")
-'''
-    run_controlled(
-        [str(PYTHON_BIN), "-c", gpu1_test],
-        "paddle_gpu1",
-        "Validating PaddleOCR on GPU 1...",
-    )
-
-
-def verify_ffmpeg():
-    run_controlled(
-        "nvidia-smi; ffmpeg -hide_banner -encoders 2>/dev/null | grep -E 'hevc_nvenc|h264_nvenc' || true; ffmpeg -hide_banner -filters 2>/dev/null | grep scale_cuda || true",
-        "gpu_ffmpeg_check",
-        "Checking NVIDIA GPU and FFmpeg NVENC/CUDA support...",
-        shell=True,
+    heartbeat(
+        "gpu_ready",
+        "starting",
+        f"GPU ready: {gpu_count} × {', '.join(gpu_names)}. Repository setup complete.",
+        gpu_count=gpu_count,
+        gpu_names=gpu_names,
+        log_path=STAGE_LOG,
     )
 
 
 def start_bot(gpu_count, gpu_names):
-    BOT_LOG.parent.mkdir(parents=True, exist_ok=True)
-    bot_env = os.environ.copy()
-    for key in ["API_ID", "API_HASH", "BOT_TOKEN", "ALLOWED_USER_ID"]:
-        bot_env[key] = runtime_secret(key, required=True)
-    for key in ["OPENAI_API_KEY", "CHANNEL_MAP", "LEECH_URL", "ADMIN_IDS"]:
-        value = runtime_secret(key, required=False)
-        if value:
-            bot_env[key] = value
-    bot_env["OCR_WORKERS"] = "2"
-    bot_env["OCR_SCAN_WIDTH"] = "1280"
-    bot_env["ENCODE_CONCURRENCY"] = "2"
+    entry = REPO_PATH / ENTRYPOINT
+    if not entry.exists():
+        raise RuntimeError(f"Encoding bot entrypoint not found: {ENTRYPOINT}")
 
+    BOT_LOG.parent.mkdir(parents=True, exist_ok=True)
     log_file = BOT_LOG.open("a", encoding="utf-8", buffering=1)
     bot_process = subprocess.Popen(
-        [str(PYTHON_BIN), "-u", "main.py"],
+        [sys.executable, "-u", ENTRYPOINT],
         cwd=str(REPO_PATH),
-        env=bot_env,
+        env=os.environ.copy(),
         stdout=log_file,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -360,13 +269,13 @@ def start_bot(gpu_count, gpu_names):
     if bot_process.poll() is not None:
         log_file.close()
         raise RuntimeError(
-            f"main.py exited immediately with code {bot_process.returncode}. Check bot log."
+            f"{ENTRYPOINT} exited immediately with code {bot_process.returncode}. Check bot log."
         )
 
     heartbeat(
         "bot_running",
         "online",
-        "Telegram bot is live and ready to use.",
+        "Encoding Telegram bot is live and ready to use.",
         gpu_count=gpu_count,
         gpu_names=gpu_names,
         bot_pid=bot_process.pid,
@@ -381,7 +290,7 @@ def start_bot(gpu_count, gpu_names):
                 heartbeat(
                     "bot_stopping",
                     "stopping",
-                    "Stop received. Terminating Telegram bot...",
+                    "Stop received. Terminating Encoding Telegram bot...",
                     gpu_count=gpu_count,
                     gpu_names=gpu_names,
                     bot_pid=bot_process.pid,
@@ -392,7 +301,7 @@ def start_bot(gpu_count, gpu_names):
                 heartbeat(
                     "stopped",
                     "stopped",
-                    "Telegram bot stopped. Kaggle worker is exiting so the GPU session can end.",
+                    "Encoding bot stopped. Kaggle worker is exiting so the GPU session can end.",
                     gpu_count=gpu_count,
                     gpu_names=gpu_names,
                     runtime_seconds=int(time.time() - started),
@@ -405,7 +314,7 @@ def start_bot(gpu_count, gpu_names):
                 heartbeat(
                     "bot_running",
                     "online",
-                    "Telegram bot is live and ready to use.",
+                    "Encoding Telegram bot is live and ready to use.",
                     gpu_count=gpu_count,
                     gpu_names=gpu_names,
                     bot_pid=bot_process.pid,
@@ -419,18 +328,15 @@ def start_bot(gpu_count, gpu_names):
             terminate_process_group(bot_process)
         log_file.close()
 
-    rc = bot_process.returncode
-    raise RuntimeError(f"Telegram bot exited unexpectedly with code {rc}.")
+    raise RuntimeError(f"Encoding Telegram bot exited unexpectedly with code {bot_process.returncode}.")
 
 
 def main():
     gpu_count = 0
     gpu_names = []
     try:
-        # This is deliberately first. It replaces the broken dependency on
-        # Kaggle UI secrets for API-pushed versions.
         bootstrap_from_controller()
-        heartbeat("boot", "starting", "Kaggle worker connected to controller. Checking GPU...")
+        heartbeat("boot", "starting", "Encoding worker connected. Checking Kaggle GPU...")
         check_stop()
 
         subprocess.run(["python", "--version"], check=False)
@@ -444,16 +350,6 @@ def main():
             gpu_names=gpu_names,
         )
 
-        if gpu_count < 2:
-            raise RuntimeError(
-                "This bot setup expects 2 GPUs because the working notebook uses PaddleOCR on GPU 0 and GPU 1. "
-                "Set KAGGLE_ACCELERATOR=NvidiaTeslaT4 so Kaggle allocates T4 x2."
-            )
-
-        check_stop()
-        heartbeat("credentials", "starting", "Runtime credentials received securely from controller.")
-        load_bot_secrets_into_environment()
-
         check_stop()
         clone_repository()
 
@@ -461,16 +357,7 @@ def main():
         install_dependencies()
 
         check_stop()
-        clean_previous_state()
-
-        check_stop()
-        warmup_gpu0()
-
-        check_stop()
-        test_gpu1()
-
-        check_stop()
-        verify_ffmpeg()
+        verify_runtime(gpu_count, gpu_names)
 
         check_stop()
         return start_bot(gpu_count, gpu_names)

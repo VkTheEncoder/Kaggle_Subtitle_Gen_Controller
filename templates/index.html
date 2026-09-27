@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Subtitle Bot Control</title>
+  <title>Kaggle Bot Control</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -11,56 +11,121 @@
     <header class="topbar">
       <div>
         <div class="eyebrow">KAGGLE GPU CONTROLLER</div>
-        <h1>Subtitle Gen Bot</h1>
+        <h1>Telegram Bot Control</h1>
+        <p class="top-copy">Start and stop each Kaggle bot independently.</p>
       </div>
       <form method="post" action="/logout"><button class="ghost" type="submit">Logout</button></form>
     </header>
 
-    <section class="hero-grid">
-      <article class="status-card">
-        <div class="status-row">
-          <span id="statusDot" class="dot offline"></span>
+    <section class="bots-grid">
+      <article class="bot-panel" data-bot="subtitle">
+        <div class="bot-title-row">
           <div>
-            <div id="phaseLabel" class="phase">OFFLINE</div>
-            <div id="message" class="message">Loading status...</div>
+            <span class="bot-tag">BOT 1</span>
+            <h2>Subtitle Gen Bot</h2>
+          </div>
+          <span id="subtitle-statusDot" class="dot offline"></span>
+        </div>
+
+        <div class="status-row compact">
+          <div>
+            <div id="subtitle-phaseLabel" class="phase">OFFLINE</div>
+            <div id="subtitle-message" class="message">Loading status...</div>
           </div>
         </div>
+
         <div class="meta-grid">
-          <div><span>Kaggle</span><strong id="kaggleStatus">—</strong></div>
-          <div><span>Worker stage</span><strong id="workerStage">—</strong></div>
-          <div><span>GPUs</span><strong id="gpuInfo">—</strong></div>
-          <div><span>Runtime</span><strong id="runtime">—</strong></div>
-          <div><span>Heartbeat</span><strong id="heartbeat">—</strong></div>
-          <div><span>Kernel</span><strong id="kernelRef">—</strong></div>
+          <div><span>Kaggle</span><strong id="subtitle-kaggleStatus">—</strong></div>
+          <div><span>Worker stage</span><strong id="subtitle-workerStage">—</strong></div>
+          <div><span>GPUs</span><strong id="subtitle-gpuInfo">—</strong></div>
+          <div><span>Runtime</span><strong id="subtitle-runtime">—</strong></div>
+          <div><span>Heartbeat</span><strong id="subtitle-heartbeat">—</strong></div>
+          <div><span>Kernel</span><strong id="subtitle-kernelRef">—</strong></div>
+        </div>
+
+        <div class="controls-row">
+          <div class="timer-control">
+            <label class="select-label" for="subtitle-autoStop">Safety auto-stop</label>
+            <select id="subtitle-autoStop">
+              <option value="30">30 minutes</option>
+              <option value="60">1 hour</option>
+              <option value="120" selected>2 hours</option>
+              <option value="180">3 hours</option>
+              <option value="0">Disabled</option>
+            </select>
+            <div id="subtitle-autoStopText" class="countdown">No active timer</div>
+          </div>
+          <div class="button-grid">
+            <button id="subtitle-startBtn" class="primary big" type="button">▶ Start Subtitle</button>
+            <button id="subtitle-stopBtn" class="danger big" type="button">■ Stop Subtitle</button>
+          </div>
+        </div>
+
+        <div class="log-grid inline-logs">
+          <article class="log-card">
+            <div class="card-head"><h3>Worker / Bot Log</h3><span>Latest tail</span></div>
+            <pre id="subtitle-workerLog">Waiting for worker...</pre>
+          </article>
+          <article class="log-card">
+            <div class="card-head"><h3>Controller Log</h3><span>Kaggle launch/status</span></div>
+            <pre id="subtitle-controllerLog">Ready.</pre>
+          </article>
         </div>
       </article>
 
-      <article class="control-card">
-        <label class="select-label" for="autoStop">Safety auto-stop</label>
-        <select id="autoStop">
-          <option value="30">30 minutes</option>
-          <option value="60">1 hour</option>
-          <option value="120" selected>2 hours</option>
-          <option value="180">3 hours</option>
-          <option value="0">Disabled</option>
-        </select>
-        <div id="autoStopText" class="countdown">No active timer</div>
-        <div class="button-grid">
-          <button id="startBtn" class="primary big" type="button">▶ Start Bot</button>
-          <button id="stopBtn" class="danger big" type="button">■ Stop Bot</button>
+      <article class="bot-panel" data-bot="encoding">
+        <div class="bot-title-row">
+          <div>
+            <span class="bot-tag">BOT 2</span>
+            <h2>Encoding Bot</h2>
+          </div>
+          <span id="encoding-statusDot" class="dot offline"></span>
         </div>
-        <p class="hint">STOP tells the Kaggle worker to kill <code>main.py</code> and exit the run, releasing the GPU session.</p>
-      </article>
-    </section>
 
-    <section class="log-grid">
-      <article class="log-card">
-        <div class="card-head"><h2>Worker / Bot Log</h2><span>Latest tail</span></div>
-        <pre id="workerLog">Waiting for worker...</pre>
-      </article>
-      <article class="log-card">
-        <div class="card-head"><h2>Controller Log</h2><span>Kaggle launch/status</span></div>
-        <pre id="controllerLog">Ready.</pre>
+        <div class="status-row compact">
+          <div>
+            <div id="encoding-phaseLabel" class="phase">OFFLINE</div>
+            <div id="encoding-message" class="message">Loading status...</div>
+          </div>
+        </div>
+
+        <div class="meta-grid">
+          <div><span>Kaggle</span><strong id="encoding-kaggleStatus">—</strong></div>
+          <div><span>Worker stage</span><strong id="encoding-workerStage">—</strong></div>
+          <div><span>GPUs</span><strong id="encoding-gpuInfo">—</strong></div>
+          <div><span>Runtime</span><strong id="encoding-runtime">—</strong></div>
+          <div><span>Heartbeat</span><strong id="encoding-heartbeat">—</strong></div>
+          <div><span>Kernel</span><strong id="encoding-kernelRef">—</strong></div>
+        </div>
+
+        <div class="controls-row">
+          <div class="timer-control">
+            <label class="select-label" for="encoding-autoStop">Safety auto-stop</label>
+            <select id="encoding-autoStop">
+              <option value="30">30 minutes</option>
+              <option value="60">1 hour</option>
+              <option value="120" selected>2 hours</option>
+              <option value="180">3 hours</option>
+              <option value="0">Disabled</option>
+            </select>
+            <div id="encoding-autoStopText" class="countdown">No active timer</div>
+          </div>
+          <div class="button-grid">
+            <button id="encoding-startBtn" class="primary big" type="button">▶ Start Encoding</button>
+            <button id="encoding-stopBtn" class="danger big" type="button">■ Stop Encoding</button>
+          </div>
+        </div>
+
+        <div class="log-grid inline-logs">
+          <article class="log-card">
+            <div class="card-head"><h3>Worker / Bot Log</h3><span>Latest tail</span></div>
+            <pre id="encoding-workerLog">Waiting for worker...</pre>
+          </article>
+          <article class="log-card">
+            <div class="card-head"><h3>Controller Log</h3><span>Kaggle launch/status</span></div>
+            <pre id="encoding-controllerLog">Ready.</pre>
+          </article>
+        </div>
       </article>
     </section>
 

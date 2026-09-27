@@ -1,0 +1,1872 @@
+diff --git a/.env.example b/.env.example
+index 026b966..0fb7c9d 100644
+--- a/.env.example
++++ b/.env.example
+@@ -6,48 +6,58 @@ DASHBOARD_PASSWORD=CHANGE_THIS_PASSWORD
+ FLASK_SECRET_KEY=GENERATE_A_LONG_RANDOM_VALUE
+ CONTROL_SECRET=GENERATE_ANOTHER_LONG_RANDOM_VALUE
+ 
+-# Public URL of this controller, with NO trailing slash.
+-# Example: https://subtitle-bot-control.onrender.com
++# Public HTTPS Render URL, NO trailing slash.
+ PUBLIC_BASE_URL=https://YOUR-CONTROLLER-DOMAIN.example
+ 
+ # ==============================
+-# Kaggle authentication
++# Kaggle authentication (shared by both bots)
+ # ==============================
+-# Compatibility method used by the Kaggle CLI: values from kaggle.json
+ KAGGLE_USERNAME=YOUR_KAGGLE_USERNAME
+ KAGGLE_KEY=YOUR_KAGGLE_API_KEY
+-
+-# Newer Kaggle CLI installations may also accept KAGGLE_API_TOKEN.
+-# Leave blank if you are using KAGGLE_USERNAME + KAGGLE_KEY.
++# Or use the newer token form instead of username/key:
+ KAGGLE_API_TOKEN=
+ 
+-# Dedicated PRIVATE Kaggle worker kernel used by this controller.
+-# Example: vktheencoder/subtitle-bot-controller-worker
+-KAGGLE_KERNEL_REF=YOUR_KAGGLE_USERNAME/subtitle-bot-controller-worker
+-KAGGLE_KERNEL_TITLE=Subtitle Bot Controller Worker
++# ==============================
++# BOT 1: Subtitle Gen
++# ==============================
++# New names. Existing KAGGLE_KERNEL_REF / KAGGLE_KERNEL_TITLE / KAGGLE_ACCELERATOR
++# are still accepted as fallbacks, so your working deployment does not have to break.
++SUBTITLE_KAGGLE_KERNEL_REF=YOUR_KAGGLE_USERNAME/subtitle-bot-controller-worker
++SUBTITLE_KAGGLE_KERNEL_TITLE=Subtitle Bot Controller Worker
++SUBTITLE_KAGGLE_ACCELERATOR=
++
++# ==============================
++# BOT 2: Encoding Bot
++# ==============================
++# MUST be a different Kaggle kernel slug from the Subtitle bot.
++ENCODING_KAGGLE_KERNEL_REF=YOUR_KAGGLE_USERNAME/encoding-bot-controller-worker
++ENCODING_KAGGLE_KERNEL_TITLE=Encoding Bot Controller Worker
++ENCODING_KAGGLE_ACCELERATOR=NvidiaTeslaT4
++
++# These defaults match the uploaded encoding notebook.
++ENCODING_REPO_OWNER=VkTheEncoder
++ENCODING_REPO_NAME=Queue3-GPU
++ENCODING_BOT_ENTRYPOINT=muxbot.py
+ 
+-# IMPORTANT:
+-# Leave blank if you want Kaggle to preserve the accelerator already configured
+-# for this worker kernel in Kaggle UI (recommended after setting GPU T4 x2 once).
+-# If you want the CLI to explicitly request an accelerator, use a Kaggle-supported ID,
+-# e.g. NvidiaTeslaT4. Your current bot expects TWO GPUs, so verify the actual allocation.
+-KAGGLE_ACCELERATOR=
++# Optional separate GitHub token for Queue3-GPU.
++# Leave blank to reuse GITHUB_TOKEN below.
++ENCODING_GITHUB_TOKEN=
+ 
+-# Optional controller settings
++# ==============================
++# Controller timing / hosting
++# ==============================
+ KAGGLE_PUSH_TIMEOUT_SECONDS=300
+ KAGGLE_STATUS_POLL_SECONDS=12
+ WORKER_HEARTBEAT_STALE_SECONDS=45
+ DEFAULT_AUTO_STOP_MINUTES=120
+-
+-# Flask / hosting
+-# Keep 1 on HTTPS hosting. Change to 0 only for local http://127.0.0.1 testing.
+ COOKIE_SECURE=1
+ PORT=5000
+-STATE_FILE=/tmp/subtitle_bot_controller_state.json
++STATE_FILE=/tmp/kaggle_multi_bot_controller_state.json
+ 
+-# === FIXED V2: runtime bot credentials stored on Render ===
+-# API-pushed Kaggle versions do not reliably inherit Kaggle UI User Secrets.
+-# The controller securely bootstraps these values to the private Kaggle worker.
++# ==============================
++# Existing Subtitle bot runtime credentials on Render
++# ==============================
++# GITHUB_TOKEN is ALSO reused to clone Queue3-GPU unless ENCODING_GITHUB_TOKEN is set.
+ GITHUB_TOKEN=
+ API_ID=
+ API_HASH=
+diff --git a/MULTI_BOT_SETUP.md b/MULTI_BOT_SETUP.md
+new file mode 100644
+index 0000000..8f87dbc
+--- /dev/null
++++ b/MULTI_BOT_SETUP.md
+@@ -0,0 +1,130 @@
++# Multi-Bot Kaggle Controller — Subtitle + Encoding Bot
++
++This version keeps the existing Subtitle Gen controller and adds a completely independent Encoding Bot controller on the same Render website.
++
++## What START Encoding does
++
++1. Render authenticates to Kaggle with the same Kaggle API credentials already used by the Subtitle controller.
++2. Render pushes a private dedicated Kaggle script kernel for the Encoding bot.
++3. The Kaggle worker detects the allocated NVIDIA GPU(s).
++4. It clones `VkTheEncoder/Queue3-GPU` (configurable with env vars).
++5. It runs `pip install -r requirements.txt`.
++6. It checks `nvidia-smi` and FFmpeg NVENC availability.
++7. It starts `python muxbot.py`.
++8. Heartbeats, GPU info and bot logs appear on the Render dashboard.
++9. STOP terminates the `muxbot.py` process group and exits the Kaggle run.
++
++This intentionally replaces the manual notebook-cell flow. The uploaded notebook contains a folder-name mismatch (`Queue3-GPU` is cloned but `Queue3-4K-GPU` is used in `%cd`); the worker uses one consistent repo path and does not depend on notebook cells.
++
++---
++
++## Render: what you already have and can keep
++
++Keep these existing values unchanged:
++
++- `DASHBOARD_USERNAME`
++- `DASHBOARD_PASSWORD`
++- `FLASK_SECRET_KEY`
++- `CONTROL_SECRET`
++- `PUBLIC_BASE_URL`
++- `KAGGLE_USERNAME` + `KAGGLE_KEY` (or `KAGGLE_API_TOKEN`)
++- `GITHUB_TOKEN`
++- Existing Subtitle bot API/token settings
++
++Your current legacy `KAGGLE_KERNEL_REF`, `KAGGLE_KERNEL_TITLE` and `KAGGLE_ACCELERATOR` still work for the Subtitle bot as fallbacks.
++
++---
++
++## Render: new variables to add for the Encoding bot
++
++Add:
++
++```env
++ENCODING_KAGGLE_KERNEL_REF=YOUR_KAGGLE_USERNAME/encoding-bot-controller-worker
++ENCODING_KAGGLE_KERNEL_TITLE=Encoding Bot Controller Worker
++ENCODING_KAGGLE_ACCELERATOR=NvidiaTeslaT4
++ENCODING_REPO_OWNER=VkTheEncoder
++ENCODING_REPO_NAME=Queue3-GPU
++ENCODING_BOT_ENTRYPOINT=muxbot.py
++```
++
++`ENCODING_KAGGLE_KERNEL_REF` must be different from the Subtitle worker kernel ref.
++
++### GitHub token
++
++If your existing `GITHUB_TOKEN` can read private repo `VkTheEncoder/Queue3-GPU`, add nothing else.
++
++If you want a different token for the Encoding repo, add:
++
++```env
++ENCODING_GITHUB_TOKEN=YOUR_TOKEN
++```
++
++The Encoding worker prefers `ENCODING_GITHUB_TOKEN`, then falls back to `GITHUB_TOKEN`.
++
++### Telegram bot credentials for Encoding
++
++The uploaded encoding notebook only clones the private repo and runs `muxbot.py`. Therefore this controller does the same. If the real private `Queue3-GPU` repo already contains the private `config.py` used by your manual Kaggle notebook, **no new Telegram credential is required on Render or Kaggle**.
++
++If that private repo does not contain `config.py`, put back whatever configuration source your manually working notebook uses before expecting the controller to start the bot. This patch does not guess or recreate your removed config file.
++
++---
++
++## Kaggle: one-time setup for the Encoding worker
++
++You do NOT need to edit the uploaded encoding notebook.
++
++1. Deploy this patched controller to Render.
++2. Add the new Render environment variables above.
++3. Open the website and press **Start Encoding**.
++4. The controller creates/pushes the private kernel slug from `ENCODING_KAGGLE_KERNEL_REF`.
++5. With `ENCODING_KAGGLE_ACCELERATOR=NvidiaTeslaT4`, the Kaggle CLI requests the **GPU T4 x2** accelerator automatically.
++6. The worker verifies the actual GPU allocation with `nvidia-smi` and shows the GPU count/names on the dashboard.
++7. From then onward use only the website Start/Stop buttons.
++
++The Encoding worker requires at least one NVIDIA GPU. `NvidiaTeslaT4` is Kaggle's current accelerator ID for the T4 x2 machine shape. Allocation still depends on your Kaggle GPU quota/availability. Your encoding bot itself decides whether an encode uses NVENC or CPU based on the codec selected in Telegram.
++
++---
++
++## Kaggle Secrets
++
++For the Encoding bot, no new Kaggle User Secret is required by this controller. The API-pushed worker securely bootstraps its GitHub token from Render, just like the fixed controller architecture.
++
++Do not add Kaggle API username/key to a notebook. Keep Kaggle API authentication on Render.
++
++---
++
++## Recommended optional cleanup for Subtitle variables
++
++You may leave your old variables exactly as they are. Or, later, rename them for clarity:
++
++```env
++SUBTITLE_KAGGLE_KERNEL_REF=YOUR_KAGGLE_USERNAME/subtitle-bot-controller-worker
++SUBTITLE_KAGGLE_KERNEL_TITLE=Subtitle Bot Controller Worker
++SUBTITLE_KAGGLE_ACCELERATOR=
++```
++
++If these are absent, the controller falls back to your old:
++
++```env
++KAGGLE_KERNEL_REF
++KAGGLE_KERNEL_TITLE
++KAGGLE_ACCELERATOR
++```
++
++---
++
++## First end-to-end test
++
++1. Redeploy Render after adding env vars.
++2. Login to the controller.
++3. Confirm both cards appear: Subtitle Gen Bot and Encoding Bot.
++4. Start only Encoding Bot first with a 30-minute auto-stop.
++5. Watch stages: `STARTING` → `SUBMITTING` → `WAITING WORKER` → `GPU CHECK` → `CLONE REPO` → `INSTALL REQUIREMENTS` → `GPU/FFMPEG CHECK` → `ONLINE`.
++6. Open Telegram and use the Encoding bot.
++7. Test one CPU encode and one GPU/NVENC encode.
++8. Press **Stop Encoding**.
++9. Confirm the Encoding card goes offline without changing the Subtitle card.
++10. Then test starting/stopping Subtitle independently.
++
++You can start both independently, subject to your Kaggle account's concurrent-session/GPU quota.
+diff --git a/README.md b/README.md
+index 8adc1db..e77156f 100644
+--- a/README.md
++++ b/README.md
+@@ -47,3 +47,6 @@ The STOP button does not merely hide the website state. The Kaggle worker receiv
+ 
+ ## IMPORTANT — use Fixed V2
+ Read `FIX_V2_README.md`. V2 removes the broken dependency on Kaggle UI User Secrets for API-pushed runs and bootstraps runtime credentials securely from Render instead.
++
++## Multi-bot update
++This build also controls `VkTheEncoder/Queue3-GPU` as a second independent Kaggle bot. See `MULTI_BOT_SETUP.md` for the exact Render/Kaggle setup and new environment variables.
+diff --git a/app.py b/app.py
+index 0c86e7f..6e65ab8 100644
+--- a/app.py
++++ b/app.py
+@@ -1,8 +1,8 @@
++import base64
++import hashlib
++import hmac
+ import json
+ import os
+-import hmac
+-import hashlib
+-import base64
+ import shutil
+ import subprocess
+ import tempfile
+@@ -12,13 +12,36 @@ from datetime import datetime, timezone
+ from functools import wraps
+ from pathlib import Path
+ 
+-from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+ from dotenv import load_dotenv
++from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+ 
+ BASE_DIR = Path(__file__).resolve().parent
+ load_dotenv(BASE_DIR / ".env")
+-WORKER_SOURCE = BASE_DIR / "kaggle_worker" / "worker.py"
+-STATE_FILE = Path(os.getenv("STATE_FILE", "/tmp/subtitle_bot_controller_state.json"))
++WORKER_DIR = BASE_DIR / "kaggle_worker"
++STATE_FILE = Path(os.getenv("STATE_FILE", "/tmp/kaggle_multi_bot_controller_state.json"))
++
++BOT_DEFS = {
++    "subtitle": {
++        "name": "Subtitle Gen Bot",
++        "worker_source": WORKER_DIR / "worker.py",
++        "kernel_ref_env": "SUBTITLE_KAGGLE_KERNEL_REF",
++        "legacy_kernel_ref_env": "KAGGLE_KERNEL_REF",
++        "kernel_title_env": "SUBTITLE_KAGGLE_KERNEL_TITLE",
++        "legacy_kernel_title_env": "KAGGLE_KERNEL_TITLE",
++        "default_title": "Subtitle Bot Controller Worker",
++        "accelerator_env": "SUBTITLE_KAGGLE_ACCELERATOR",
++        "legacy_accelerator_env": "KAGGLE_ACCELERATOR",
++    },
++    "encoding": {
++        "name": "Encoding Bot",
++        "worker_source": WORKER_DIR / "encoding_worker.py",
++        "kernel_ref_env": "ENCODING_KAGGLE_KERNEL_REF",
++        "kernel_title_env": "ENCODING_KAGGLE_KERNEL_TITLE",
++        "default_title": "Encoding Bot Controller Worker",
++        "accelerator_env": "ENCODING_KAGGLE_ACCELERATOR",
++        "default_accelerator": "NvidiaTeslaT4",
++    },
++}
+ 
+ app = Flask(__name__)
+ app.secret_key = os.getenv("FLASK_SECRET_KEY", "CHANGE-ME-IN-PRODUCTION")
+@@ -29,14 +52,14 @@ app.config.update(
+ )
+ 
+ STATE_LOCK = threading.RLock()
+-START_LOCK = threading.Lock()
++START_LOCKS = {bot_id: threading.Lock() for bot_id in BOT_DEFS}
+ 
+ 
+ def utc_now_iso():
+     return datetime.now(timezone.utc).isoformat()
+ 
+ 
+-def default_state():
++def default_bot_state():
+     return {
+         "desired_state": "stopped",
+         "phase": "offline",
+@@ -55,17 +78,27 @@ def default_state():
+     }
+ 
+ 
++def default_state():
++    return {"bots": {bot_id: default_bot_state() for bot_id in BOT_DEFS}}
++
++
+ def load_state():
+-    with STATE_LOCK:
+-        state = default_state()
+-        try:
+-            if STATE_FILE.exists():
+-                loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+-                if isinstance(loaded, dict):
+-                    state.update(loaded)
+-        except Exception:
+-            pass
+-        return state
++    state = default_state()
++    try:
++        if STATE_FILE.exists():
++            loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
++            if isinstance(loaded, dict):
++                if isinstance(loaded.get("bots"), dict):
++                    for bot_id in BOT_DEFS:
++                        saved = loaded["bots"].get(bot_id)
++                        if isinstance(saved, dict):
++                            state["bots"][bot_id].update(saved)
++                else:
++                    # One-time migration from the original single-bot controller state.
++                    state["bots"]["subtitle"].update(loaded)
++    except Exception:
++        pass
++    return state
+ 
+ 
+ STATE = load_state()
+@@ -79,23 +112,30 @@ def save_state():
+         tmp.replace(STATE_FILE)
+ 
+ 
+-def mutate_state(**updates):
++def bot_state(bot_id):
++    if bot_id not in BOT_DEFS:
++        raise KeyError(bot_id)
++    return STATE["bots"][bot_id]
++
++
++def mutate_bot_state(bot_id, **updates):
+     with STATE_LOCK:
+-        STATE.update(updates)
++        bot_state(bot_id).update(updates)
+         save_state()
+ 
+ 
+-def append_controller_log(text):
++def append_controller_log(bot_id, text):
+     if not text:
+         return
+     stamp = datetime.now().strftime("%H:%M:%S")
+     with STATE_LOCK:
+-        logs = list(STATE.get("controller_log", []))
++        state = bot_state(bot_id)
++        logs = list(state.get("controller_log", []))
+         for line in str(text).splitlines():
+             line = line.strip()
+             if line:
+                 logs.append(f"[{stamp}] {line}")
+-        STATE["controller_log"] = logs[-220:]
++        state["controller_log"] = logs[-220:]
+         save_state()
+ 
+ 
+@@ -118,66 +158,84 @@ def _control_secret():
+ 
+ 
+ def _sign_value(value):
+-    return hmac.new(_control_secret().encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
++    return hmac.new(
++        _control_secret().encode("utf-8"), value.encode("utf-8"), hashlib.sha256
++    ).hexdigest()
+ 
+ 
+-def make_bootstrap_token(generation):
++def make_bootstrap_token(bot_id, generation):
+     issued = int(time.time())
+-    body = f"{int(generation)}:{issued}"
++    body = f"{bot_id}:{int(generation)}:{issued}"
+     sig = _sign_value("bootstrap:" + body)
+     raw = f"{body}:{sig}".encode("utf-8")
+     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+ 
+ 
+-def validate_bootstrap_token(token, generation, max_age=1800):
++def validate_bootstrap_token(token, bot_id, generation, max_age=1800):
+     try:
+         padded = str(token) + "=" * (-len(str(token)) % 4)
+         raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+-        gen_text, issued_text, sig = raw.split(":", 2)
++        token_bot_id, gen_text, issued_text, sig = raw.split(":", 3)
+         gen = int(gen_text)
+         issued = int(issued_text)
+-        if gen != int(generation):
++        if token_bot_id != bot_id or gen != int(generation):
+             return False
+         if abs(time.time() - issued) > max_age:
+             return False
+-        expected = _sign_value(f"bootstrap:{gen}:{issued}")
++        expected = _sign_value(f"bootstrap:{bot_id}:{gen}:{issued}")
+         return hmac.compare_digest(sig, expected)
+     except Exception:
+         return False
+ 
+ 
+-def run_secret_for(generation):
+-    return _sign_value(f"run:{int(generation)}")
++def run_secret_for(bot_id, generation):
++    return _sign_value(f"run:{bot_id}:{int(generation)}")
+ 
+ 
+-def verify_worker_secret():
++def verify_worker_secret(bot_id):
++    if bot_id not in BOT_DEFS:
++        return False
+     provided = request.headers.get("X-Run-Secret", "")
+     generation = request.headers.get("X-Run-Generation", "")
+     try:
+         generation = int(generation)
+     except Exception:
+         return False
+-    expected = run_secret_for(generation)
++    expected = run_secret_for(bot_id, generation)
+     if not provided or not hmac.compare_digest(str(provided), str(expected)):
+         return False
+     with STATE_LOCK:
+-        return generation == int(STATE.get("generation") or 0)
+-
++        return generation == int(bot_state(bot_id).get("generation") or 0)
++
++
++def runtime_config_from_env(bot_id):
++    if bot_id == "subtitle":
++        required = ["GITHUB_TOKEN", "API_ID", "API_HASH", "BOT_TOKEN", "ALLOWED_USER_ID"]
++        optional = ["OPENAI_API_KEY", "ADMIN_IDS", "CHANNEL_MAP", "LEECH_URL"]
++        config = {}
++        missing = []
++        for key in required + optional:
++            value = os.getenv(key, "").strip()
++            if value:
++                config[key] = value
++            elif key in required:
++                missing.append(key)
++        if missing:
++            raise RuntimeError(
++                "Missing Render runtime credentials for Subtitle bot: " + ", ".join(missing)
++            )
++        return config
++
++    if bot_id == "encoding":
++        # Reuse the existing GitHub token by default. A separate token is optional.
++        github_token = os.getenv("ENCODING_GITHUB_TOKEN", "").strip() or os.getenv("GITHUB_TOKEN", "").strip()
++        if not github_token:
++            raise RuntimeError(
++                "Missing GitHub token for Encoding bot. Set GITHUB_TOKEN or ENCODING_GITHUB_TOKEN on Render."
++            )
++        return {"GITHUB_TOKEN": github_token}
+ 
+-def runtime_config_from_env():
+-    required = ["GITHUB_TOKEN", "API_ID", "API_HASH", "BOT_TOKEN", "ALLOWED_USER_ID"]
+-    optional = ["OPENAI_API_KEY", "ADMIN_IDS", "CHANNEL_MAP", "LEECH_URL"]
+-    config = {}
+-    missing = []
+-    for key in required + optional:
+-        value = os.getenv(key, "").strip()
+-        if value:
+-            config[key] = value
+-        elif key in required:
+-            missing.append(key)
+-    if missing:
+-        raise RuntimeError("Missing Render runtime credentials: " + ", ".join(missing))
+-    return config
++    raise RuntimeError(f"Unknown bot id: {bot_id}")
+ 
+ 
+ def kaggle_env():
+@@ -199,32 +257,79 @@ def kaggle_env():
+     return env
+ 
+ 
+-def kernel_ref():
+-    ref = os.getenv("KAGGLE_KERNEL_REF", "").strip().strip("/")
++def _bot_env_value(bot_id, primary_key, legacy_key=None, default=""):
++    value = os.getenv(primary_key, "").strip()
++    if not value and legacy_key:
++        value = os.getenv(legacy_key, "").strip()
++    return value or default
++
++
++def kernel_ref(bot_id):
++    cfg = BOT_DEFS[bot_id]
++    ref = _bot_env_value(
++        bot_id,
++        cfg["kernel_ref_env"],
++        cfg.get("legacy_kernel_ref_env"),
++    ).strip("/")
+     if "/" not in ref:
+         raise RuntimeError(
+-            "KAGGLE_KERNEL_REF must look like username/subtitle-bot-controller-worker"
++            f"{cfg['kernel_ref_env']} must look like username/{bot_id}-bot-controller-worker"
+         )
+     return ref
+ 
+ 
+-def prepare_worker_directory(generation):
+-    ref = kernel_ref()
+-    title = os.getenv("KAGGLE_KERNEL_TITLE", "Subtitle Bot Controller Worker").strip()
+-    accelerator = os.getenv("KAGGLE_ACCELERATOR", "").strip()
++def kernel_title(bot_id):
++    cfg = BOT_DEFS[bot_id]
++    return _bot_env_value(
++        bot_id,
++        cfg["kernel_title_env"],
++        cfg.get("legacy_kernel_title_env"),
++        cfg["default_title"],
++    )
++
++
++def accelerator_for(bot_id):
++    cfg = BOT_DEFS[bot_id]
++    return _bot_env_value(
++        bot_id,
++        cfg["accelerator_env"],
++        cfg.get("legacy_accelerator_env"),
++        cfg.get("default_accelerator", ""),
++    )
++
++
++def prepare_worker_directory(bot_id, generation):
++    cfg = BOT_DEFS[bot_id]
++    ref = kernel_ref(bot_id)
++    title = kernel_title(bot_id)
++    accelerator = accelerator_for(bot_id)
+ 
+     public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+     if not public_base_url.startswith("https://"):
+-        raise RuntimeError("PUBLIC_BASE_URL must be the HTTPS Render URL, e.g. https://your-service.onrender.com")
++        raise RuntimeError(
++            "PUBLIC_BASE_URL must be the HTTPS Render URL, e.g. https://your-service.onrender.com"
++        )
+ 
+-    # Validate all runtime credentials before spending GPU quota. Values are never logged.
+-    runtime_config_from_env()
++    # Validate credentials before consuming a Kaggle GPU session.
++    runtime_config_from_env(bot_id)
+ 
+-    workdir = Path(tempfile.mkdtemp(prefix="subtitle-kaggle-worker-"))
+-    worker_text = WORKER_SOURCE.read_text(encoding="utf-8")
++    workdir = Path(tempfile.mkdtemp(prefix=f"{bot_id}-kaggle-worker-"))
++    worker_text = cfg["worker_source"].read_text(encoding="utf-8")
+     worker_text = worker_text.replace("__CONTROLLER_URL_JSON__", json.dumps(public_base_url))
+-    worker_text = worker_text.replace("__BOOTSTRAP_TOKEN_JSON__", json.dumps(make_bootstrap_token(generation)))
++    worker_text = worker_text.replace(
++        "__BOOTSTRAP_TOKEN_JSON__", json.dumps(make_bootstrap_token(bot_id, generation))
++    )
+     worker_text = worker_text.replace("__RUN_GENERATION_JSON__", json.dumps(int(generation)))
++    worker_text = worker_text.replace("__BOT_ID_JSON__", json.dumps(bot_id))
++
++    if bot_id == "encoding":
++        repo_owner = os.getenv("ENCODING_REPO_OWNER", "VkTheEncoder").strip() or "VkTheEncoder"
++        repo_name = os.getenv("ENCODING_REPO_NAME", "Queue3-GPU").strip() or "Queue3-GPU"
++        entrypoint = os.getenv("ENCODING_BOT_ENTRYPOINT", "muxbot.py").strip() or "muxbot.py"
++        worker_text = worker_text.replace("__REPO_OWNER_JSON__", json.dumps(repo_owner))
++        worker_text = worker_text.replace("__REPO_NAME_JSON__", json.dumps(repo_name))
++        worker_text = worker_text.replace("__ENTRYPOINT_JSON__", json.dumps(entrypoint))
++
+     (workdir / "worker.py").write_text(worker_text, encoding="utf-8")
+ 
+     metadata = {
+@@ -248,7 +353,7 @@ def prepare_worker_directory(generation):
+     return workdir, accelerator
+ 
+ 
+-def run_cli(command, timeout=120):
++def run_cli(bot_id, command, timeout=120):
+     env = kaggle_env()
+     try:
+         result = subprocess.run(
+@@ -263,12 +368,12 @@ def run_cli(command, timeout=120):
+     except subprocess.TimeoutExpired as exc:
+         output = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+         if output:
+-            append_controller_log(output)
++            append_controller_log(bot_id, output)
+         raise TimeoutError(f"Command timed out after {timeout}s") from exc
+ 
+     output = result.stdout or ""
+     if output:
+-        append_controller_log(output)
++        append_controller_log(bot_id, output)
+     return result.returncode, output
+ 
+ 
+@@ -292,82 +397,90 @@ def parse_kaggle_status(text):
+     return "unknown"
+ 
+ 
+-def poll_kaggle_status(generation):
++def poll_kaggle_status(bot_id, generation):
+     poll_seconds = max(5, int(os.getenv("KAGGLE_STATUS_POLL_SECONDS", "12")))
+     while True:
+         with STATE_LOCK:
+-            if generation != STATE.get("generation"):
++            state = bot_state(bot_id)
++            if generation != state.get("generation"):
+                 return
+-            desired = STATE.get("desired_state")
+-            phase = STATE.get("phase")
++            desired = state.get("desired_state")
++            phase = state.get("phase")
+         try:
+             rc, output = run_cli(
+-                ["kaggle", "kernels", "status", kernel_ref()], timeout=45
++                bot_id, ["kaggle", "kernels", "status", kernel_ref(bot_id)], timeout=45
+             )
+             status = parse_kaggle_status(output)
+             fetch_error_logs = False
+             with STATE_LOCK:
+-                STATE["kaggle_status"] = status if rc == 0 else "status_error"
++                state = bot_state(bot_id)
++                state["kaggle_status"] = status if rc == 0 else "status_error"
+                 if status == "error" and phase not in {"offline", "stopping"}:
+-                    STATE["phase"] = "error"
+-                    STATE["message"] = "Kaggle worker run failed. Fetching Kaggle traceback..."
+-                    if STATE.get("error_logs_fetched_generation") != generation:
+-                        STATE["error_logs_fetched_generation"] = generation
++                    state["phase"] = "error"
++                    state["message"] = "Kaggle worker run failed. Fetching Kaggle traceback..."
++                    if state.get("error_logs_fetched_generation") != generation:
++                        state["error_logs_fetched_generation"] = generation
+                         fetch_error_logs = True
+                 elif status == "complete":
+                     if desired == "stopped":
+-                        STATE["phase"] = "offline"
+-                        STATE["message"] = "Stopped. Kaggle run completed."
++                        state["phase"] = "offline"
++                        state["message"] = "Stopped. Kaggle run completed."
+                     elif phase not in {"online", "error"}:
+-                        STATE["phase"] = "offline"
+-                        STATE["message"] = "Kaggle run finished before the bot became live."
++                        state["phase"] = "offline"
++                        state["message"] = "Kaggle run finished before the bot became live."
+                 save_state()
+ 
+             if fetch_error_logs:
+-                append_controller_log("Kaggle reported ERROR; fetching the kernel traceback...")
++                append_controller_log(bot_id, "Kaggle reported ERROR; fetching the kernel traceback...")
+                 try:
+-                    run_cli(["kaggle", "kernels", "logs", kernel_ref()], timeout=90)
++                    run_cli(bot_id, ["kaggle", "kernels", "logs", kernel_ref(bot_id)], timeout=90)
+                 except Exception as exc:
+-                    append_controller_log(f"Could not fetch Kaggle error log: {exc}")
++                    append_controller_log(bot_id, f"Could not fetch Kaggle error log: {exc}")
+         except Exception as exc:
+-            append_controller_log(f"Status check warning: {exc}")
++            append_controller_log(bot_id, f"Status check warning: {exc}")
+ 
+         with STATE_LOCK:
+-            if generation != STATE.get("generation"):
++            state = bot_state(bot_id)
++            if generation != state.get("generation"):
+                 return
+-            if STATE.get("desired_state") == "stopped" and STATE.get("phase") == "offline":
++            if state.get("desired_state") == "stopped" and state.get("phase") == "offline":
+                 return
+         time.sleep(poll_seconds)
+ 
+ 
+-def submit_kaggle_job(generation):
+-    if not START_LOCK.acquire(blocking=False):
+-        append_controller_log("Another start operation is already in progress.")
++def submit_kaggle_job(bot_id, generation):
++    lock = START_LOCKS[bot_id]
++    if not lock.acquire(blocking=False):
++        append_controller_log(bot_id, "Another start operation is already in progress.")
+         return
+     worker_dir = None
+     try:
+-        append_controller_log("Preparing Kaggle worker package...")
+-        worker_dir, accelerator = prepare_worker_directory(generation)
++        append_controller_log(bot_id, "Preparing Kaggle worker package...")
++        worker_dir, accelerator = prepare_worker_directory(bot_id, generation)
+ 
+         command = ["kaggle", "kernels", "push", "-p", str(worker_dir)]
+         if accelerator:
+             command.extend(["--accelerator", accelerator])
+ 
+-        mutate_state(
++        mutate_bot_state(
++            bot_id,
+             phase="submitting",
+             message="Submitting worker to Kaggle...",
+             kaggle_status="submitting",
+         )
+-        append_controller_log("Submitting private worker kernel to Kaggle.")
++        append_controller_log(bot_id, "Submitting private worker kernel to Kaggle.")
+         if accelerator:
+-            append_controller_log(f"Requested accelerator: {accelerator}")
++            append_controller_log(bot_id, f"Requested accelerator: {accelerator}")
+         else:
+-            append_controller_log("No accelerator override requested; using/preserving Kaggle kernel setting.")
++            append_controller_log(
++                bot_id, "No accelerator override requested; using/preserving Kaggle kernel setting."
++            )
+ 
+         timeout = int(os.getenv("KAGGLE_PUSH_TIMEOUT_SECONDS", "300"))
+-        rc, output = run_cli(command, timeout=timeout)
++        rc, _ = run_cli(bot_id, command, timeout=timeout)
+         if rc != 0:
+-            mutate_state(
++            mutate_bot_state(
++                bot_id,
+                 phase="error",
+                 message="Kaggle submission failed. Check controller logs.",
+                 kaggle_status="submit_error",
+@@ -375,22 +488,23 @@ def submit_kaggle_job(generation):
+             return
+ 
+         with STATE_LOCK:
+-            if generation != STATE.get("generation"):
++            state = bot_state(bot_id)
++            if generation != state.get("generation"):
+                 return
+-            STATE["phase"] = "waiting_worker"
+-            STATE["message"] = "Kaggle started. Waiting for worker heartbeat..."
+-            STATE["kaggle_status"] = "queued"
++            state["phase"] = "waiting_worker"
++            state["message"] = "Kaggle started. Waiting for worker heartbeat..."
++            state["kaggle_status"] = "queued"
+             save_state()
+         threading.Thread(
+-            target=poll_kaggle_status, args=(generation,), daemon=True
++            target=poll_kaggle_status, args=(bot_id, generation), daemon=True
+         ).start()
+     except Exception as exc:
+-        append_controller_log(f"START ERROR: {exc}")
+-        mutate_state(phase="error", message=str(exc), kaggle_status="error")
++        append_controller_log(bot_id, f"START ERROR: {exc}")
++        mutate_bot_state(bot_id, phase="error", message=str(exc), kaggle_status="error")
+     finally:
+         if worker_dir:
+             shutil.rmtree(worker_dir, ignore_errors=True)
+-        START_LOCK.release()
++        lock.release()
+ 
+ 
+ def watchdog_loop():
+@@ -398,27 +512,29 @@ def watchdog_loop():
+         try:
+             now = time.time()
+             with STATE_LOCK:
+-                auto_stop_at = STATE.get("auto_stop_at")
+-                desired = STATE.get("desired_state")
+-                phase = STATE.get("phase")
+-                last_hb = float(STATE.get("last_heartbeat") or 0)
+                 stale_seconds = int(os.getenv("WORKER_HEARTBEAT_STALE_SECONDS", "45"))
+-
+-                if auto_stop_at and desired == "running" and now >= float(auto_stop_at):
+-                    STATE["desired_state"] = "stopped"
+-                    STATE["phase"] = "stopping"
+-                    STATE["message"] = "Auto-stop reached. Asking Kaggle worker to exit..."
+-                    STATE["stop_requested_at"] = utc_now_iso()
+-                    STATE["auto_stop_at"] = None
+-                    append_controller_log("Auto-stop timer reached; stop command issued.")
+-                    save_state()
+-
+-                if phase == "online" and last_hb and (now - last_hb) > stale_seconds:
+-                    STATE["phase"] = "heartbeat_lost"
+-                    STATE["message"] = "Worker heartbeat lost; checking Kaggle status."
+-                    save_state()
+-        except Exception as exc:
+-            append_controller_log(f"Watchdog warning: {exc}")
++                for bot_id in BOT_DEFS:
++                    state = bot_state(bot_id)
++                    auto_stop_at = state.get("auto_stop_at")
++                    desired = state.get("desired_state")
++                    phase = state.get("phase")
++                    last_hb = float(state.get("last_heartbeat") or 0)
++
++                    if auto_stop_at and desired == "running" and now >= float(auto_stop_at):
++                        state["desired_state"] = "stopped"
++                        state["phase"] = "stopping"
++                        state["message"] = "Auto-stop reached. Asking Kaggle worker to exit..."
++                        state["stop_requested_at"] = utc_now_iso()
++                        state["auto_stop_at"] = None
++                        append_controller_log(bot_id, "Auto-stop timer reached; stop command issued.")
++
++                    if phase == "online" and last_hb and (now - last_hb) > stale_seconds:
++                        state["phase"] = "heartbeat_lost"
++                        state["message"] = "Worker heartbeat lost; checking Kaggle status."
++                save_state()
++        except Exception:
++            # Do not recursively log here because logging also takes STATE_LOCK.
++            pass
+         time.sleep(5)
+ 
+ 
+@@ -454,7 +570,7 @@ def logout():
+ @app.route("/")
+ @dashboard_auth_required
+ def index():
+-    return render_template("index.html")
++    return render_template("index.html", bots=BOT_DEFS)
+ 
+ 
+ @app.route("/health")
+@@ -468,21 +584,29 @@ def api_status():
+     with STATE_LOCK:
+         snapshot = json.loads(json.dumps(STATE))
+     now = time.time()
+-    hb = float(snapshot.get("last_heartbeat") or 0)
+-    snapshot["heartbeat_age_seconds"] = round(now - hb, 1) if hb else None
+-    if snapshot.get("auto_stop_at"):
+-        snapshot["auto_stop_remaining_seconds"] = max(
+-            0, int(float(snapshot["auto_stop_at"]) - now)
+-        )
+-    else:
+-        snapshot["auto_stop_remaining_seconds"] = None
+-    snapshot["kernel_ref"] = os.getenv("KAGGLE_KERNEL_REF", "")
+-    return jsonify({"ok": True, "state": snapshot})
++    for bot_id, state in snapshot["bots"].items():
++        hb = float(state.get("last_heartbeat") or 0)
++        state["heartbeat_age_seconds"] = round(now - hb, 1) if hb else None
++        if state.get("auto_stop_at"):
++            state["auto_stop_remaining_seconds"] = max(
++                0, int(float(state["auto_stop_at"]) - now)
++            )
++        else:
++            state["auto_stop_remaining_seconds"] = None
++        try:
++            state["kernel_ref"] = kernel_ref(bot_id)
++        except Exception:
++            state["kernel_ref"] = "Not configured"
++        state["display_name"] = BOT_DEFS[bot_id]["name"]
++    return jsonify({"ok": True, "bots": snapshot["bots"]})
+ 
+ 
+-@app.route("/api/start", methods=["POST"])
++@app.route("/api/start/<bot_id>", methods=["POST"])
+ @dashboard_auth_required
+-def api_start():
++def api_start(bot_id):
++    if bot_id not in BOT_DEFS:
++        return jsonify({"ok": False, "error": "Unknown bot."}), 404
++
+     data = request.get_json(silent=True) or {}
+     raw_minutes = data.get("auto_stop_minutes", os.getenv("DEFAULT_AUTO_STOP_MINUTES", "120"))
+     try:
+@@ -492,45 +616,58 @@ def api_start():
+         auto_minutes = 120
+ 
+     with STATE_LOCK:
+-        if STATE.get("desired_state") == "running" and STATE.get("phase") not in {"offline", "error", "heartbeat_lost"}:
+-            return jsonify({"ok": False, "error": "Bot is already starting or running."}), 409
+-
+-        STATE["generation"] = int(STATE.get("generation", 0)) + 1
+-        generation = STATE["generation"]
+-        STATE["desired_state"] = "running"
+-        STATE["phase"] = "starting"
+-        STATE["message"] = "Start requested. Preparing Kaggle job..."
+-        STATE["kaggle_status"] = "preparing"
+-        STATE["last_heartbeat"] = 0.0
+-        STATE["last_heartbeat_iso"] = None
+-        STATE["worker"] = {}
+-        STATE["worker_log"] = ""
+-        STATE["controller_log"] = []
+-        STATE["start_requested_at"] = utc_now_iso()
+-        STATE["stop_requested_at"] = None
+-        STATE["auto_stop_at"] = time.time() + auto_minutes * 60 if auto_minutes else None
++        state = bot_state(bot_id)
++        if state.get("desired_state") == "running" and state.get("phase") not in {
++            "offline", "error", "heartbeat_lost"
++        }:
++            return jsonify({"ok": False, "error": f"{BOT_DEFS[bot_id]['name']} is already starting or running."}), 409
++
++        state["generation"] = int(state.get("generation", 0)) + 1
++        generation = state["generation"]
++        state["desired_state"] = "running"
++        state["phase"] = "starting"
++        state["message"] = "Start requested. Preparing Kaggle job..."
++        state["kaggle_status"] = "preparing"
++        state["last_heartbeat"] = 0.0
++        state["last_heartbeat_iso"] = None
++        state["worker"] = {}
++        state["worker_log"] = ""
++        state["controller_log"] = []
++        state["start_requested_at"] = utc_now_iso()
++        state["stop_requested_at"] = None
++        state["auto_stop_at"] = time.time() + auto_minutes * 60 if auto_minutes else None
++        state["error_logs_fetched_generation"] = None
+         save_state()
+ 
+-    threading.Thread(target=submit_kaggle_job, args=(generation,), daemon=True).start()
+-    return jsonify({"ok": True, "message": "Start command accepted."})
++    threading.Thread(
++        target=submit_kaggle_job, args=(bot_id, generation), daemon=True
++    ).start()
++    return jsonify({"ok": True, "message": f"{BOT_DEFS[bot_id]['name']} start accepted."})
+ 
+ 
+-@app.route("/api/stop", methods=["POST"])
++@app.route("/api/stop/<bot_id>", methods=["POST"])
+ @dashboard_auth_required
+-def api_stop():
++def api_stop(bot_id):
++    if bot_id not in BOT_DEFS:
++        return jsonify({"ok": False, "error": "Unknown bot."}), 404
+     with STATE_LOCK:
+-        STATE["desired_state"] = "stopped"
+-        STATE["phase"] = "stopping"
+-        STATE["message"] = "Stop requested. Waiting for Kaggle worker to exit..."
+-        STATE["stop_requested_at"] = utc_now_iso()
+-        STATE["auto_stop_at"] = None
++        state = bot_state(bot_id)
++        state["desired_state"] = "stopped"
++        state["phase"] = "stopping"
++        state["message"] = "Stop requested. Waiting for Kaggle worker to exit..."
++        state["stop_requested_at"] = utc_now_iso()
++        state["auto_stop_at"] = None
+         save_state()
+-    append_controller_log("STOP requested from dashboard. Worker will terminate the bot and exit the Kaggle run.")
+-    return jsonify({"ok": True, "message": "Stop command accepted."})
++    append_controller_log(
++        bot_id, "STOP requested from dashboard. Worker will terminate the bot and exit the Kaggle run."
++    )
++    return jsonify({"ok": True, "message": f"{BOT_DEFS[bot_id]['name']} stop accepted."})
+ 
+ 
+-@app.route("/api/worker/bootstrap", methods=["POST"])
+-def worker_bootstrap():
++@app.route("/api/worker/<bot_id>/bootstrap", methods=["POST"])
++def worker_bootstrap(bot_id):
++    if bot_id not in BOT_DEFS:
++        return jsonify({"ok": False, "error": "Unknown bot."}), 404
+     data = request.get_json(silent=True) or {}
+     try:
+         generation = int(data.get("generation"))
+@@ -539,40 +676,41 @@ def worker_bootstrap():
+ 
+     token = request.headers.get("X-Bootstrap-Token", "")
+     with STATE_LOCK:
+-        current_generation = int(STATE.get("generation") or 0)
+-        desired = STATE.get("desired_state")
++        state = bot_state(bot_id)
++        current_generation = int(state.get("generation") or 0)
++        desired = state.get("desired_state")
+     if generation != current_generation or desired != "running":
+         return jsonify({"ok": False, "error": "This run is no longer active"}), 409
+-    if not validate_bootstrap_token(token, generation):
++    if not validate_bootstrap_token(token, bot_id, generation):
+         return jsonify({"ok": False, "error": "Invalid or expired bootstrap token"}), 403
+ 
+     try:
+-        config = runtime_config_from_env()
++        config = runtime_config_from_env(bot_id)
+     except Exception as exc:
+-        append_controller_log(f"BOOTSTRAP CONFIG ERROR: {exc}")
++        append_controller_log(bot_id, f"BOOTSTRAP CONFIG ERROR: {exc}")
+         return jsonify({"ok": False, "error": str(exc)}), 500
+ 
+-    append_controller_log(f"Kaggle worker bootstrap connected for generation {generation}.")
++    append_controller_log(bot_id, f"Kaggle worker bootstrap connected for generation {generation}.")
+     return jsonify({
+         "ok": True,
+-        "run_secret": run_secret_for(generation),
++        "run_secret": run_secret_for(bot_id, generation),
+         "config": config,
+         "server_time": utc_now_iso(),
+     })
+ 
+ 
+-@app.route("/api/worker/command")
+-def worker_command():
+-    if not verify_worker_secret():
++@app.route("/api/worker/<bot_id>/command")
++def worker_command(bot_id):
++    if not verify_worker_secret(bot_id):
+         return jsonify({"ok": False, "error": "Forbidden"}), 403
+     with STATE_LOCK:
+-        desired = STATE.get("desired_state", "stopped")
++        desired = bot_state(bot_id).get("desired_state", "stopped")
+     return jsonify({"ok": True, "desired_state": desired, "server_time": utc_now_iso()})
+ 
+ 
+-@app.route("/api/worker/heartbeat", methods=["POST"])
+-def worker_heartbeat():
+-    if not verify_worker_secret():
++@app.route("/api/worker/<bot_id>/heartbeat", methods=["POST"])
++def worker_heartbeat(bot_id):
++    if not verify_worker_secret(bot_id):
+         return jsonify({"ok": False, "error": "Forbidden"}), 403
+     data = request.get_json(silent=True) or {}
+     status = str(data.get("status", "starting"))[:40]
+@@ -581,9 +719,10 @@ def worker_heartbeat():
+     log_tail = str(data.get("log_tail", ""))[-12000:]
+ 
+     with STATE_LOCK:
+-        STATE["last_heartbeat"] = time.time()
+-        STATE["last_heartbeat_iso"] = utc_now_iso()
+-        STATE["worker"] = {
++        state = bot_state(bot_id)
++        state["last_heartbeat"] = time.time()
++        state["last_heartbeat_iso"] = utc_now_iso()
++        state["worker"] = {
+             "status": status,
+             "stage": stage,
+             "message": message,
+@@ -593,25 +732,25 @@ def worker_heartbeat():
+             "runtime_seconds": data.get("runtime_seconds"),
+         }
+         if log_tail:
+-            STATE["worker_log"] = log_tail
++            state["worker_log"] = log_tail
+ 
+-        desired = STATE.get("desired_state")
++        desired = state.get("desired_state")
+         if status == "online" and desired == "running":
+-            STATE["phase"] = "online"
+-            STATE["message"] = message or "Telegram bot is live."
+-            STATE["kaggle_status"] = "running"
++            state["phase"] = "online"
++            state["message"] = message or "Telegram bot is live."
++            state["kaggle_status"] = "running"
+         elif status == "error":
+-            STATE["phase"] = "error"
+-            STATE["message"] = message or "Worker reported an error."
++            state["phase"] = "error"
++            state["message"] = message or "Worker reported an error."
+         elif status in {"stopped", "stopping"}:
+-            STATE["phase"] = "stopping" if status == "stopping" else "offline"
+-            STATE["message"] = message or ("Stopping..." if status == "stopping" else "Stopped.")
+-        elif desired == "running" and STATE.get("phase") not in {"online", "error"}:
+-            STATE["phase"] = "worker_starting"
+-            STATE["message"] = message or f"Worker stage: {stage}"
++            state["phase"] = "stopping" if status == "stopping" else "offline"
++            state["message"] = message or ("Stopping..." if status == "stopping" else "Stopped.")
++        elif desired == "running" and state.get("phase") not in {"online", "error"}:
++            state["phase"] = "worker_starting"
++            state["message"] = message or f"Worker stage: {stage}"
+         save_state()
+ 
+-    return jsonify({"ok": True, "desired_state": STATE.get("desired_state")})
++    return jsonify({"ok": True, "desired_state": bot_state(bot_id).get("desired_state")})
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/kaggle_worker/encoding_worker.py b/kaggle_worker/encoding_worker.py
+new file mode 100644
+index 0000000..41b6da5
+--- /dev/null
++++ b/kaggle_worker/encoding_worker.py
+@@ -0,0 +1,392 @@
++"""Kaggle worker for the Queue3-GPU Telegram encoding bot.
++
++This reproduces the uploaded encoding notebook without requiring manual Kaggle
++cell execution: clone repo -> install requirements -> run muxbot.py.
++The Render controller supplies only the GitHub token required to clone the
++private repository; the bot's own config.py remains inside that private repo.
++"""
++
++import json
++import os
++import shutil
++import signal
++import subprocess
++import sys
++import time
++import urllib.request
++from pathlib import Path
++
++REPO_OWNER = __REPO_OWNER_JSON__
++REPO_NAME = __REPO_NAME_JSON__
++ENTRYPOINT = __ENTRYPOINT_JSON__
++REPO_PATH = Path(f"/kaggle/working/{REPO_NAME}")
++BOT_LOG = Path("/kaggle/working/encoding-bot.log")
++STAGE_LOG = Path("/kaggle/working/encoding-controller-stage.log")
++POLL_SECONDS = 5
++HEARTBEAT_SECONDS = 10
++
++CONTROLLER_URL = __CONTROLLER_URL_JSON__.rstrip("/")
++BOOTSTRAP_TOKEN = __BOOTSTRAP_TOKEN_JSON__
++RUN_GENERATION = __RUN_GENERATION_JSON__
++BOT_ID = __BOT_ID_JSON__
++
++RUN_SECRET = ""
++RUNTIME_CONFIG = {}
++
++
++class StopRequested(Exception):
++    pass
++
++
++def raw_http_json(method, path, payload=None, headers=None, timeout=20):
++    url = CONTROLLER_URL + path
++    data = None
++    req_headers = dict(headers or {})
++    if payload is not None:
++        data = json.dumps(payload).encode("utf-8")
++        req_headers["Content-Type"] = "application/json"
++    req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
++    with urllib.request.urlopen(req, timeout=timeout) as resp:
++        body = resp.read().decode("utf-8", errors="replace")
++        return json.loads(body) if body else {}
++
++
++def bootstrap_from_controller():
++    global RUN_SECRET, RUNTIME_CONFIG
++    result = raw_http_json(
++        "POST",
++        f"/api/worker/{BOT_ID}/bootstrap",
++        payload={"generation": RUN_GENERATION},
++        headers={"X-Bootstrap-Token": BOOTSTRAP_TOKEN},
++        timeout=30,
++    )
++    if not result.get("ok"):
++        raise RuntimeError("Controller bootstrap rejected the Kaggle worker.")
++    RUN_SECRET = str(result.get("run_secret") or "").strip()
++    config = result.get("config") or {}
++    if not RUN_SECRET:
++        raise RuntimeError("Controller bootstrap did not provide a run secret.")
++    if not isinstance(config, dict):
++        raise RuntimeError("Controller bootstrap returned an invalid runtime config.")
++    RUNTIME_CONFIG = {str(k): str(v) for k, v in config.items() if v is not None}
++
++
++def http_json(method, path, payload=None, timeout=8):
++    if not RUN_SECRET:
++        raise RuntimeError("Worker has not completed controller bootstrap.")
++    return raw_http_json(
++        method,
++        path,
++        payload=payload,
++        headers={
++            "X-Run-Secret": RUN_SECRET,
++            "X-Run-Generation": str(RUN_GENERATION),
++        },
++        timeout=timeout,
++    )
++
++
++def runtime_secret(name, required=False, default=None):
++    value = RUNTIME_CONFIG.get(name)
++    if value is not None:
++        value = str(value).strip()
++    if value:
++        return value
++    if required:
++        raise RuntimeError(f"Required runtime credential '{name}' was not supplied by controller.")
++    return default
++
++
++def command_state():
++    try:
++        result = http_json("GET", f"/api/worker/{BOT_ID}/command")
++        return result.get("desired_state", "running")
++    except Exception as exc:
++        print(f"Controller command check warning: {exc}", flush=True)
++        return "running"
++
++
++def check_stop():
++    if command_state() == "stopped":
++        raise StopRequested("Stop requested from controller.")
++
++
++def tail_file(path, max_lines=80, max_chars=12000):
++    try:
++        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
++        return "\n".join(lines[-max_lines:])[-max_chars:]
++    except Exception:
++        return ""
++
++
++def heartbeat(stage, status="starting", message="", gpu_count=None, gpu_names=None,
++              bot_pid=None, runtime_seconds=None, log_path=None):
++    payload = {
++        "stage": stage,
++        "status": status,
++        "message": message,
++        "gpu_count": gpu_count,
++        "gpu_names": gpu_names or [],
++        "bot_pid": bot_pid,
++        "runtime_seconds": runtime_seconds,
++        "log_tail": tail_file(log_path) if log_path else "",
++    }
++    try:
++        http_json("POST", f"/api/worker/{BOT_ID}/heartbeat", payload=payload)
++    except Exception as exc:
++        print(f"Heartbeat warning: {exc}", flush=True)
++
++
++def terminate_process_group(proc, grace=15):
++    if not proc or proc.poll() is not None:
++        return
++    try:
++        os.killpg(proc.pid, signal.SIGTERM)
++    except Exception:
++        try:
++            proc.terminate()
++        except Exception:
++            return
++    deadline = time.time() + grace
++    while proc.poll() is None and time.time() < deadline:
++        time.sleep(0.5)
++    if proc.poll() is None:
++        try:
++            os.killpg(proc.pid, signal.SIGKILL)
++        except Exception:
++            try:
++                proc.kill()
++            except Exception:
++                pass
++
++
++def run_controlled(command, stage, message, cwd=None, env=None, shell=False, check=True):
++    STAGE_LOG.parent.mkdir(parents=True, exist_ok=True)
++    with STAGE_LOG.open("a", encoding="utf-8", buffering=1) as log:
++        print(f"\n===== {stage}: {message} =====", file=log, flush=True)
++        proc = subprocess.Popen(
++            command,
++            cwd=str(cwd) if cwd else None,
++            env=env,
++            shell=shell,
++            stdout=log,
++            stderr=subprocess.STDOUT,
++            start_new_session=True,
++            text=True,
++        )
++        last_hb = 0
++        while proc.poll() is None:
++            try:
++                check_stop()
++            except StopRequested:
++                terminate_process_group(proc)
++                raise
++            now = time.time()
++            if now - last_hb >= HEARTBEAT_SECONDS:
++                heartbeat(stage, "starting", message, log_path=STAGE_LOG)
++                last_hb = now
++            time.sleep(POLL_SECONDS)
++        rc = proc.returncode
++    if check and rc != 0:
++        raise RuntimeError(f"Stage '{stage}' failed with exit code {rc}. See stage log on dashboard.")
++    return rc
++
++
++def detect_gpus():
++    result = subprocess.run(
++        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
++    return len(names), names
++
++
++def clone_repository():
++    github_token = runtime_secret("GITHUB_TOKEN", required=True)
++    clone_url = f"https://{REPO_OWNER}:{github_token}@github.com/{REPO_OWNER}/{REPO_NAME}.git"
++    if REPO_PATH.exists():
++        shutil.rmtree(REPO_PATH, ignore_errors=True)
++    run_controlled(
++        ["git", "clone", clone_url, str(REPO_PATH)],
++        "clone_repo",
++        f"Cloning private repository {REPO_OWNER}/{REPO_NAME}...",
++    )
++
++
++def install_dependencies():
++    requirements = REPO_PATH / "requirements.txt"
++    if not requirements.exists():
++        raise RuntimeError(f"requirements.txt not found in {REPO_OWNER}/{REPO_NAME}.")
++    run_controlled(
++        [sys.executable, "-m", "pip", "install", "-r", str(requirements)],
++        "install_requirements",
++        "Installing Encoding Bot requirements...",
++        cwd=REPO_PATH,
++    )
++
++
++def verify_runtime(gpu_count, gpu_names):
++    if gpu_count < 1:
++        raise RuntimeError(
++            "No NVIDIA GPU was allocated. Open the dedicated Encoding worker kernel once and set its accelerator to GPU T4 x2."
++        )
++    run_controlled(
++        "nvidia-smi; ffmpeg -hide_banner -encoders 2>/dev/null | grep -E 'hevc_nvenc|h264_nvenc' || true",
++        "gpu_ffmpeg_check",
++        f"Detected {gpu_count} GPU(s). Checking FFmpeg/NVENC support...",
++        shell=True,
++        check=False,
++    )
++    heartbeat(
++        "gpu_ready",
++        "starting",
++        f"GPU ready: {gpu_count} × {', '.join(gpu_names)}. Repository setup complete.",
++        gpu_count=gpu_count,
++        gpu_names=gpu_names,
++        log_path=STAGE_LOG,
++    )
++
++
++def start_bot(gpu_count, gpu_names):
++    entry = REPO_PATH / ENTRYPOINT
++    if not entry.exists():
++        raise RuntimeError(f"Encoding bot entrypoint not found: {ENTRYPOINT}")
++
++    BOT_LOG.parent.mkdir(parents=True, exist_ok=True)
++    log_file = BOT_LOG.open("a", encoding="utf-8", buffering=1)
++    bot_process = subprocess.Popen(
++        [sys.executable, "-u", ENTRYPOINT],
++        cwd=str(REPO_PATH),
++        env=os.environ.copy(),
++        stdout=log_file,
++        stderr=subprocess.STDOUT,
++        start_new_session=True,
++    )
++    started = time.time()
++    time.sleep(3)
++    if bot_process.poll() is not None:
++        log_file.close()
++        raise RuntimeError(
++            f"{ENTRYPOINT} exited immediately with code {bot_process.returncode}. Check bot log."
++        )
++
++    heartbeat(
++        "bot_running",
++        "online",
++        "Encoding Telegram bot is live and ready to use.",
++        gpu_count=gpu_count,
++        gpu_names=gpu_names,
++        bot_pid=bot_process.pid,
++        runtime_seconds=0,
++        log_path=BOT_LOG,
++    )
++
++    last_hb = 0
++    try:
++        while bot_process.poll() is None:
++            if command_state() == "stopped":
++                heartbeat(
++                    "bot_stopping",
++                    "stopping",
++                    "Stop received. Terminating Encoding Telegram bot...",
++                    gpu_count=gpu_count,
++                    gpu_names=gpu_names,
++                    bot_pid=bot_process.pid,
++                    runtime_seconds=int(time.time() - started),
++                    log_path=BOT_LOG,
++                )
++                terminate_process_group(bot_process)
++                heartbeat(
++                    "stopped",
++                    "stopped",
++                    "Encoding bot stopped. Kaggle worker is exiting so the GPU session can end.",
++                    gpu_count=gpu_count,
++                    gpu_names=gpu_names,
++                    runtime_seconds=int(time.time() - started),
++                    log_path=BOT_LOG,
++                )
++                return 0
++
++            now = time.time()
++            if now - last_hb >= HEARTBEAT_SECONDS:
++                heartbeat(
++                    "bot_running",
++                    "online",
++                    "Encoding Telegram bot is live and ready to use.",
++                    gpu_count=gpu_count,
++                    gpu_names=gpu_names,
++                    bot_pid=bot_process.pid,
++                    runtime_seconds=int(now - started),
++                    log_path=BOT_LOG,
++                )
++                last_hb = now
++            time.sleep(POLL_SECONDS)
++    finally:
++        if bot_process.poll() is None:
++            terminate_process_group(bot_process)
++        log_file.close()
++
++    raise RuntimeError(f"Encoding Telegram bot exited unexpectedly with code {bot_process.returncode}.")
++
++
++def main():
++    gpu_count = 0
++    gpu_names = []
++    try:
++        bootstrap_from_controller()
++        heartbeat("boot", "starting", "Encoding worker connected. Checking Kaggle GPU...")
++        check_stop()
++
++        subprocess.run(["python", "--version"], check=False)
++        subprocess.run(["nvidia-smi"], check=False)
++        gpu_count, gpu_names = detect_gpus()
++        heartbeat(
++            "gpu_check",
++            "starting",
++            f"Detected {gpu_count} GPU(s): {', '.join(gpu_names) if gpu_names else 'none'}",
++            gpu_count=gpu_count,
++            gpu_names=gpu_names,
++        )
++
++        check_stop()
++        clone_repository()
++
++        check_stop()
++        install_dependencies()
++
++        check_stop()
++        verify_runtime(gpu_count, gpu_names)
++
++        check_stop()
++        return start_bot(gpu_count, gpu_names)
++
++    except StopRequested as exc:
++        if RUN_SECRET:
++            heartbeat(
++                "stopped",
++                "stopped",
++                str(exc),
++                gpu_count=gpu_count,
++                gpu_names=gpu_names,
++                log_path=STAGE_LOG,
++            )
++        print(str(exc), flush=True)
++        return 0
++    except Exception as exc:
++        if RUN_SECRET:
++            heartbeat(
++                "error",
++                "error",
++                str(exc),
++                gpu_count=gpu_count,
++                gpu_names=gpu_names,
++                log_path=BOT_LOG if BOT_LOG.exists() else STAGE_LOG,
++            )
++        print(f"FATAL: {exc}", file=sys.stderr, flush=True)
++        raise
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/kaggle_worker/worker.py b/kaggle_worker/worker.py
+index 876c190..4a162a0 100644
+--- a/kaggle_worker/worker.py
++++ b/kaggle_worker/worker.py
+@@ -33,6 +33,7 @@ HEARTBEAT_SECONDS = 10
+ CONTROLLER_URL = __CONTROLLER_URL_JSON__.rstrip("/")
+ BOOTSTRAP_TOKEN = __BOOTSTRAP_TOKEN_JSON__
+ RUN_GENERATION = __RUN_GENERATION_JSON__
++BOT_ID = __BOT_ID_JSON__
+ 
+ RUN_SECRET = ""
+ RUNTIME_CONFIG = {}
+@@ -59,7 +60,7 @@ def bootstrap_from_controller():
+     global RUN_SECRET, RUNTIME_CONFIG
+     result = raw_http_json(
+         "POST",
+-        "/api/worker/bootstrap",
++        f"/api/worker/{BOT_ID}/bootstrap",
+         payload={"generation": RUN_GENERATION},
+         headers={"X-Bootstrap-Token": BOOTSTRAP_TOKEN},
+         timeout=30,
+@@ -103,7 +104,7 @@ def runtime_secret(name, required=False, default=None):
+ 
+ def command_state():
+     try:
+-        result = http_json("GET", "/api/worker/command")
++        result = http_json("GET", f"/api/worker/{BOT_ID}/command")
+         return result.get("desired_state", "running")
+     except Exception as exc:
+         print(f"Controller command check warning: {exc}", flush=True)
+@@ -139,7 +140,7 @@ def heartbeat(stage, status="starting", message="", gpu_count=None, gpu_names=No
+         "log_tail": tail_file(log_path or STAGE_LOG),
+     }
+     try:
+-        http_json("POST", "/api/worker/heartbeat", payload)
++        http_json("POST", f"/api/worker/{BOT_ID}/heartbeat", payload)
+     except Exception as exc:
+         print(f"Heartbeat warning: {exc}", flush=True)
+ 
+diff --git a/static/app.js b/static/app.js
+index 396ec26..cd2f2c0 100644
+--- a/static/app.js
++++ b/static/app.js
+@@ -1,10 +1,8 @@
+ const $ = (id) => document.getElementById(id);
+-const startBtn = $("startBtn");
+-const stopBtn = $("stopBtn");
+-const autoStop = $("autoStop");
++const BOT_IDS = ["subtitle", "encoding"];
+ const toast = $("toast");
+-let lastWorkerLog = "";
+-let lastControllerLog = "";
++const lastWorkerLog = {};
++const lastControllerLog = {};
+ 
+ function showToast(text) {
+   toast.textContent = text;
+@@ -25,48 +23,50 @@ function formatRuntime(seconds) {
+ function phaseClass(phase) {
+   if (phase === "online") return "online";
+   if (["error", "heartbeat_lost"].includes(phase)) return "error";
+-  if (["offline"].includes(phase)) return "offline";
++  if (phase === "offline") return "offline";
+   return "starting";
+ }
+ 
+-function render(state) {
+-  const phase = state.phase || "offline";
+-  $("phaseLabel").textContent = phase.replaceAll("_", " ").toUpperCase();
+-  $("message").textContent = state.message || "";
+-  $("kaggleStatus").textContent = state.kaggle_status || "—";
+-  $("workerStage").textContent = state.worker?.stage || "—";
+-  $("kernelRef").textContent = state.kernel_ref || "Not configured";
+-  $("runtime").textContent = formatRuntime(state.worker?.runtime_seconds);
+-  $("heartbeat").textContent = state.heartbeat_age_seconds === null ? "—" : `${Math.round(state.heartbeat_age_seconds)}s ago`;
++function renderBot(botId, state) {
++  const phase = state?.phase || "offline";
++  $(`${botId}-phaseLabel`).textContent = phase.replaceAll("_", " ").toUpperCase();
++  $(`${botId}-message`).textContent = state?.message || "";
++  $(`${botId}-kaggleStatus`).textContent = state?.kaggle_status || "—";
++  $(`${botId}-workerStage`).textContent = state?.worker?.stage || "—";
++  $(`${botId}-kernelRef`).textContent = state?.kernel_ref || "Not configured";
++  $(`${botId}-runtime`).textContent = formatRuntime(state?.worker?.runtime_seconds);
++  $(`${botId}-heartbeat`).textContent = state?.heartbeat_age_seconds === null || state?.heartbeat_age_seconds === undefined
++    ? "—"
++    : `${Math.round(state.heartbeat_age_seconds)}s ago`;
+ 
+-  const names = state.worker?.gpu_names || [];
+-  const count = state.worker?.gpu_count;
+-  $("gpuInfo").textContent = count ? `${count} × ${names.join(", ") || "GPU"}` : "—";
++  const names = state?.worker?.gpu_names || [];
++  const count = state?.worker?.gpu_count;
++  $(`${botId}-gpuInfo`).textContent = count ? `${count} × ${names.join(", ") || "GPU"}` : "—";
+ 
+-  const dot = $("statusDot");
++  const dot = $(`${botId}-statusDot`);
+   dot.className = `dot ${phaseClass(phase)}`;
+ 
+   const busy = ["starting", "submitting", "waiting_worker", "worker_starting", "online", "stopping"].includes(phase);
+-  startBtn.disabled = busy && phase !== "heartbeat_lost";
+-  stopBtn.disabled = phase === "offline";
++  $(`${botId}-startBtn`).disabled = busy && phase !== "heartbeat_lost";
++  $(`${botId}-stopBtn`).disabled = phase === "offline";
+ 
+-  if (state.auto_stop_remaining_seconds !== null) {
+-    $("autoStopText").textContent = `Auto-stop in ${formatRuntime(state.auto_stop_remaining_seconds)}`;
++  if (state?.auto_stop_remaining_seconds !== null && state?.auto_stop_remaining_seconds !== undefined) {
++    $(`${botId}-autoStopText`).textContent = `Auto-stop in ${formatRuntime(state.auto_stop_remaining_seconds)}`;
+   } else {
+-    $("autoStopText").textContent = "No active timer";
++    $(`${botId}-autoStopText`).textContent = "No active timer";
+   }
+ 
+-  const workerLog = state.worker_log || "Waiting for worker...";
+-  const controllerLog = (state.controller_log || []).join("\n") || "Ready.";
+-  if (workerLog !== lastWorkerLog) {
+-    $("workerLog").textContent = workerLog;
+-    $("workerLog").scrollTop = $("workerLog").scrollHeight;
+-    lastWorkerLog = workerLog;
++  const workerLog = state?.worker_log || "Waiting for worker...";
++  const controllerLog = (state?.controller_log || []).join("\n") || "Ready.";
++  if (workerLog !== lastWorkerLog[botId]) {
++    $(`${botId}-workerLog`).textContent = workerLog;
++    $(`${botId}-workerLog`).scrollTop = $(`${botId}-workerLog`).scrollHeight;
++    lastWorkerLog[botId] = workerLog;
+   }
+-  if (controllerLog !== lastControllerLog) {
+-    $("controllerLog").textContent = controllerLog;
+-    $("controllerLog").scrollTop = $("controllerLog").scrollHeight;
+-    lastControllerLog = controllerLog;
++  if (controllerLog !== lastControllerLog[botId]) {
++    $(`${botId}-controllerLog`).textContent = controllerLog;
++    $(`${botId}-controllerLog`).scrollTop = $(`${botId}-controllerLog`).scrollHeight;
++    lastControllerLog[botId] = controllerLog;
+   }
+ }
+ 
+@@ -78,9 +78,13 @@ async function refresh() {
+       return;
+     }
+     const data = await res.json();
+-    if (data.ok) render(data.state);
++    if (data.ok) {
++      for (const botId of BOT_IDS) renderBot(botId, data.bots?.[botId] || {});
++    }
+   } catch (err) {
+-    $("message").textContent = "Controller connection lost. Retrying...";
++    for (const botId of BOT_IDS) {
++      $(`${botId}-message`).textContent = "Controller connection lost. Retrying...";
++    }
+   }
+ }
+ 
+@@ -95,31 +99,34 @@ async function post(path, body = {}) {
+   return data;
+ }
+ 
+-startBtn.addEventListener("click", async () => {
+-  try {
+-    startBtn.disabled = true;
+-    const minutes = Number(autoStop.value || 0);
+-    const data = await post("/api/start", { auto_stop_minutes: minutes });
+-    showToast(data.message || "Start requested");
+-    await refresh();
+-  } catch (err) {
+-    showToast(err.message);
+-    await refresh();
+-  }
+-});
++for (const botId of BOT_IDS) {
++  $(`${botId}-startBtn`).addEventListener("click", async () => {
++    try {
++      $(`${botId}-startBtn`).disabled = true;
++      const minutes = Number($(`${botId}-autoStop`).value || 0);
++      const data = await post(`/api/start/${botId}`, { auto_stop_minutes: minutes });
++      showToast(data.message || "Start requested");
++      await refresh();
++    } catch (err) {
++      showToast(err.message);
++      await refresh();
++    }
++  });
+ 
+-stopBtn.addEventListener("click", async () => {
+-  if (!confirm("Stop the Telegram bot and end the Kaggle worker run?")) return;
+-  try {
+-    stopBtn.disabled = true;
+-    const data = await post("/api/stop");
+-    showToast(data.message || "Stop requested");
+-    await refresh();
+-  } catch (err) {
+-    showToast(err.message);
+-    await refresh();
+-  }
+-});
++  $(`${botId}-stopBtn`).addEventListener("click", async () => {
++    const label = botId === "subtitle" ? "Subtitle bot" : "Encoding bot";
++    if (!confirm(`Stop the ${label} and end its Kaggle worker run?`)) return;
++    try {
++      $(`${botId}-stopBtn`).disabled = true;
++      const data = await post(`/api/stop/${botId}`);
++      showToast(data.message || "Stop requested");
++      await refresh();
++    } catch (err) {
++      showToast(err.message);
++      await refresh();
++    }
++  });
++}
+ 
+ refresh();
+ setInterval(refresh, 3000);
+diff --git a/static/style.css b/static/style.css
+index e272a95..053963b 100644
+--- a/static/style.css
++++ b/static/style.css
+@@ -73,3 +73,21 @@ code { color: #b9d9ff; }
+   .status-card, .control-card { padding: 18px; }
+   pre { height: 280px; }
+ }
++
++/* Multi-bot dashboard */
++.top-copy { color: var(--muted); margin: 6px 0 0; }
++.bots-grid { display: grid; gap: 24px; }
++.bot-panel { border: 1px solid var(--border); background: rgba(17,23,34,.92); border-radius: 22px; padding: 24px; }
++.bot-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 16px; }
++.bot-title-row h2 { margin: 5px 0 0; font-size: 25px; }
++.bot-tag { display: inline-flex; padding: 4px 8px; border: 1px solid #29415f; border-radius: 999px; color: #9cc8ff; background: #101d2d; font-size: 10px; font-weight: 900; letter-spacing: .12em; }
++.status-row.compact { padding: 0 0 18px; }
++.controls-row { display: grid; grid-template-columns: minmax(220px, .45fr) minmax(300px, .55fr); gap: 18px; align-items: end; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--border); }
++.controls-row .button-grid { margin-bottom: 18px; }
++.inline-logs { margin-top: 4px; }
++.inline-logs h3 { margin: 0; font-size: 15px; }
++.inline-logs pre { height: 260px; }
++@media (max-width: 820px) {
++  .controls-row { grid-template-columns: 1fr; }
++  .controls-row .button-grid { margin-bottom: 0; }
++}
+diff --git a/templates/index.html b/templates/index.html
+index ee92c9d..7cfea71 100644
+--- a/templates/index.html
++++ b/templates/index.html
+@@ -3,7 +3,7 @@
+ <head>
+   <meta charset="utf-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1">
+-  <title>Subtitle Bot Control</title>
++  <title>Kaggle Bot Control</title>
+   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+ </head>
+ <body>
+@@ -11,56 +11,121 @@
+     <header class="topbar">
+       <div>
+         <div class="eyebrow">KAGGLE GPU CONTROLLER</div>
+-        <h1>Subtitle Gen Bot</h1>
++        <h1>Telegram Bot Control</h1>
++        <p class="top-copy">Start and stop each Kaggle bot independently.</p>
+       </div>
+       <form method="post" action="/logout"><button class="ghost" type="submit">Logout</button></form>
+     </header>
+ 
+-    <section class="hero-grid">
+-      <article class="status-card">
+-        <div class="status-row">
+-          <span id="statusDot" class="dot offline"></span>
++    <section class="bots-grid">
++      <article class="bot-panel" data-bot="subtitle">
++        <div class="bot-title-row">
+           <div>
+-            <div id="phaseLabel" class="phase">OFFLINE</div>
+-            <div id="message" class="message">Loading status...</div>
++            <span class="bot-tag">BOT 1</span>
++            <h2>Subtitle Gen Bot</h2>
+           </div>
++          <span id="subtitle-statusDot" class="dot offline"></span>
+         </div>
++
++        <div class="status-row compact">
++          <div>
++            <div id="subtitle-phaseLabel" class="phase">OFFLINE</div>
++            <div id="subtitle-message" class="message">Loading status...</div>
++          </div>
++        </div>
++
+         <div class="meta-grid">
+-          <div><span>Kaggle</span><strong id="kaggleStatus">—</strong></div>
+-          <div><span>Worker stage</span><strong id="workerStage">—</strong></div>
+-          <div><span>GPUs</span><strong id="gpuInfo">—</strong></div>
+-          <div><span>Runtime</span><strong id="runtime">—</strong></div>
+-          <div><span>Heartbeat</span><strong id="heartbeat">—</strong></div>
+-          <div><span>Kernel</span><strong id="kernelRef">—</strong></div>
++          <div><span>Kaggle</span><strong id="subtitle-kaggleStatus">—</strong></div>
++          <div><span>Worker stage</span><strong id="subtitle-workerStage">—</strong></div>
++          <div><span>GPUs</span><strong id="subtitle-gpuInfo">—</strong></div>
++          <div><span>Runtime</span><strong id="subtitle-runtime">—</strong></div>
++          <div><span>Heartbeat</span><strong id="subtitle-heartbeat">—</strong></div>
++          <div><span>Kernel</span><strong id="subtitle-kernelRef">—</strong></div>
++        </div>
++
++        <div class="controls-row">
++          <div class="timer-control">
++            <label class="select-label" for="subtitle-autoStop">Safety auto-stop</label>
++            <select id="subtitle-autoStop">
++              <option value="30">30 minutes</option>
++              <option value="60">1 hour</option>
++              <option value="120" selected>2 hours</option>
++              <option value="180">3 hours</option>
++              <option value="0">Disabled</option>
++            </select>
++            <div id="subtitle-autoStopText" class="countdown">No active timer</div>
++          </div>
++          <div class="button-grid">
++            <button id="subtitle-startBtn" class="primary big" type="button">▶ Start Subtitle</button>
++            <button id="subtitle-stopBtn" class="danger big" type="button">■ Stop Subtitle</button>
++          </div>
+         </div>
+-      </article>
+ 
+-      <article class="control-card">
+-        <label class="select-label" for="autoStop">Safety auto-stop</label>
+-        <select id="autoStop">
+-          <option value="30">30 minutes</option>
+-          <option value="60">1 hour</option>
+-          <option value="120" selected>2 hours</option>
+-          <option value="180">3 hours</option>
+-          <option value="0">Disabled</option>
+-        </select>
+-        <div id="autoStopText" class="countdown">No active timer</div>
+-        <div class="button-grid">
+-          <button id="startBtn" class="primary big" type="button">▶ Start Bot</button>
+-          <button id="stopBtn" class="danger big" type="button">■ Stop Bot</button>
++        <div class="log-grid inline-logs">
++          <article class="log-card">
++            <div class="card-head"><h3>Worker / Bot Log</h3><span>Latest tail</span></div>
++            <pre id="subtitle-workerLog">Waiting for worker...</pre>
++          </article>
++          <article class="log-card">
++            <div class="card-head"><h3>Controller Log</h3><span>Kaggle launch/status</span></div>
++            <pre id="subtitle-controllerLog">Ready.</pre>
++          </article>
+         </div>
+-        <p class="hint">STOP tells the Kaggle worker to kill <code>main.py</code> and exit the run, releasing the GPU session.</p>
+       </article>
+-    </section>
+ 
+-    <section class="log-grid">
+-      <article class="log-card">
+-        <div class="card-head"><h2>Worker / Bot Log</h2><span>Latest tail</span></div>
+-        <pre id="workerLog">Waiting for worker...</pre>
+-      </article>
+-      <article class="log-card">
+-        <div class="card-head"><h2>Controller Log</h2><span>Kaggle launch/status</span></div>
+-        <pre id="controllerLog">Ready.</pre>
++      <article class="bot-panel" data-bot="encoding">
++        <div class="bot-title-row">
++          <div>
++            <span class="bot-tag">BOT 2</span>
++            <h2>Encoding Bot</h2>
++          </div>
++          <span id="encoding-statusDot" class="dot offline"></span>
++        </div>
++
++        <div class="status-row compact">
++          <div>
++            <div id="encoding-phaseLabel" class="phase">OFFLINE</div>
++            <div id="encoding-message" class="message">Loading status...</div>
++          </div>
++        </div>
++
++        <div class="meta-grid">
++          <div><span>Kaggle</span><strong id="encoding-kaggleStatus">—</strong></div>
++          <div><span>Worker stage</span><strong id="encoding-workerStage">—</strong></div>
++          <div><span>GPUs</span><strong id="encoding-gpuInfo">—</strong></div>
++          <div><span>Runtime</span><strong id="encoding-runtime">—</strong></div>
++          <div><span>Heartbeat</span><strong id="encoding-heartbeat">—</strong></div>
++          <div><span>Kernel</span><strong id="encoding-kernelRef">—</strong></div>
++        </div>
++
++        <div class="controls-row">
++          <div class="timer-control">
++            <label class="select-label" for="encoding-autoStop">Safety auto-stop</label>
++            <select id="encoding-autoStop">
++              <option value="30">30 minutes</option>
++              <option value="60">1 hour</option>
++              <option value="120" selected>2 hours</option>
++              <option value="180">3 hours</option>
++              <option value="0">Disabled</option>
++            </select>
++            <div id="encoding-autoStopText" class="countdown">No active timer</div>
++          </div>
++          <div class="button-grid">
++            <button id="encoding-startBtn" class="primary big" type="button">▶ Start Encoding</button>
++            <button id="encoding-stopBtn" class="danger big" type="button">■ Stop Encoding</button>
++          </div>
++        </div>
++
++        <div class="log-grid inline-logs">
++          <article class="log-card">
++            <div class="card-head"><h3>Worker / Bot Log</h3><span>Latest tail</span></div>
++            <pre id="encoding-workerLog">Waiting for worker...</pre>
++          </article>
++          <article class="log-card">
++            <div class="card-head"><h3>Controller Log</h3><span>Kaggle launch/status</span></div>
++            <pre id="encoding-controllerLog">Ready.</pre>
++          </article>
++        </div>
+       </article>
+     </section>
+ 

@@ -47,3 +47,6 @@ The STOP button does not merely hide the website state. The Kaggle worker receiv
 
 ## IMPORTANT — use Fixed V2
 Read `FIX_V2_README.md`. V2 removes the broken dependency on Kaggle UI User Secrets for API-pushed runs and bootstraps runtime credentials securely from Render instead.
+
+## Multi-bot update
+This build also controls `VkTheEncoder/Queue3-GPU` as a second independent Kaggle bot. See `MULTI_BOT_SETUP.md` for the exact Render/Kaggle setup and new environment variables.

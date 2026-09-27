@@ -1,10 +1,8 @@
 const $ = (id) => document.getElementById(id);
-const startBtn = $("startBtn");
-const stopBtn = $("stopBtn");
-const autoStop = $("autoStop");
+const BOT_IDS = ["subtitle", "encoding"];
 const toast = $("toast");
-let lastWorkerLog = "";
-let lastControllerLog = "";
+const lastWorkerLog = {};
+const lastControllerLog = {};
 
 function showToast(text) {
   toast.textContent = text;
@@ -25,48 +23,50 @@ function formatRuntime(seconds) {
 function phaseClass(phase) {
   if (phase === "online") return "online";
   if (["error", "heartbeat_lost"].includes(phase)) return "error";
-  if (["offline"].includes(phase)) return "offline";
+  if (phase === "offline") return "offline";
   return "starting";
 }
 
-function render(state) {
-  const phase = state.phase || "offline";
-  $("phaseLabel").textContent = phase.replaceAll("_", " ").toUpperCase();
-  $("message").textContent = state.message || "";
-  $("kaggleStatus").textContent = state.kaggle_status || "—";
-  $("workerStage").textContent = state.worker?.stage || "—";
-  $("kernelRef").textContent = state.kernel_ref || "Not configured";
-  $("runtime").textContent = formatRuntime(state.worker?.runtime_seconds);
-  $("heartbeat").textContent = state.heartbeat_age_seconds === null ? "—" : `${Math.round(state.heartbeat_age_seconds)}s ago`;
+function renderBot(botId, state) {
+  const phase = state?.phase || "offline";
+  $(`${botId}-phaseLabel`).textContent = phase.replaceAll("_", " ").toUpperCase();
+  $(`${botId}-message`).textContent = state?.message || "";
+  $(`${botId}-kaggleStatus`).textContent = state?.kaggle_status || "—";
+  $(`${botId}-workerStage`).textContent = state?.worker?.stage || "—";
+  $(`${botId}-kernelRef`).textContent = state?.kernel_ref || "Not configured";
+  $(`${botId}-runtime`).textContent = formatRuntime(state?.worker?.runtime_seconds);
+  $(`${botId}-heartbeat`).textContent = state?.heartbeat_age_seconds === null || state?.heartbeat_age_seconds === undefined
+    ? "—"
+    : `${Math.round(state.heartbeat_age_seconds)}s ago`;
 
-  const names = state.worker?.gpu_names || [];
-  const count = state.worker?.gpu_count;
-  $("gpuInfo").textContent = count ? `${count} × ${names.join(", ") || "GPU"}` : "—";
+  const names = state?.worker?.gpu_names || [];
+  const count = state?.worker?.gpu_count;
+  $(`${botId}-gpuInfo`).textContent = count ? `${count} × ${names.join(", ") || "GPU"}` : "—";
 
-  const dot = $("statusDot");
+  const dot = $(`${botId}-statusDot`);
   dot.className = `dot ${phaseClass(phase)}`;
 
   const busy = ["starting", "submitting", "waiting_worker", "worker_starting", "online", "stopping"].includes(phase);
-  startBtn.disabled = busy && phase !== "heartbeat_lost";
-  stopBtn.disabled = phase === "offline";
+  $(`${botId}-startBtn`).disabled = busy && phase !== "heartbeat_lost";
+  $(`${botId}-stopBtn`).disabled = phase === "offline";
 
-  if (state.auto_stop_remaining_seconds !== null) {
-    $("autoStopText").textContent = `Auto-stop in ${formatRuntime(state.auto_stop_remaining_seconds)}`;
+  if (state?.auto_stop_remaining_seconds !== null && state?.auto_stop_remaining_seconds !== undefined) {
+    $(`${botId}-autoStopText`).textContent = `Auto-stop in ${formatRuntime(state.auto_stop_remaining_seconds)}`;
   } else {
-    $("autoStopText").textContent = "No active timer";
+    $(`${botId}-autoStopText`).textContent = "No active timer";
   }
 
-  const workerLog = state.worker_log || "Waiting for worker...";
-  const controllerLog = (state.controller_log || []).join("\n") || "Ready.";
-  if (workerLog !== lastWorkerLog) {
-    $("workerLog").textContent = workerLog;
-    $("workerLog").scrollTop = $("workerLog").scrollHeight;
-    lastWorkerLog = workerLog;
+  const workerLog = state?.worker_log || "Waiting for worker...";
+  const controllerLog = (state?.controller_log || []).join("\n") || "Ready.";
+  if (workerLog !== lastWorkerLog[botId]) {
+    $(`${botId}-workerLog`).textContent = workerLog;
+    $(`${botId}-workerLog`).scrollTop = $(`${botId}-workerLog`).scrollHeight;
+    lastWorkerLog[botId] = workerLog;
   }
-  if (controllerLog !== lastControllerLog) {
-    $("controllerLog").textContent = controllerLog;
-    $("controllerLog").scrollTop = $("controllerLog").scrollHeight;
-    lastControllerLog = controllerLog;
+  if (controllerLog !== lastControllerLog[botId]) {
+    $(`${botId}-controllerLog`).textContent = controllerLog;
+    $(`${botId}-controllerLog`).scrollTop = $(`${botId}-controllerLog`).scrollHeight;
+    lastControllerLog[botId] = controllerLog;
   }
 }
 
@@ -78,9 +78,13 @@ async function refresh() {
       return;
     }
     const data = await res.json();
-    if (data.ok) render(data.state);
+    if (data.ok) {
+      for (const botId of BOT_IDS) renderBot(botId, data.bots?.[botId] || {});
+    }
   } catch (err) {
-    $("message").textContent = "Controller connection lost. Retrying...";
+    for (const botId of BOT_IDS) {
+      $(`${botId}-message`).textContent = "Controller connection lost. Retrying...";
+    }
   }
 }
 
@@ -95,31 +99,34 @@ async function post(path, body = {}) {
   return data;
 }
 
-startBtn.addEventListener("click", async () => {
-  try {
-    startBtn.disabled = true;
-    const minutes = Number(autoStop.value || 0);
-    const data = await post("/api/start", { auto_stop_minutes: minutes });
-    showToast(data.message || "Start requested");
-    await refresh();
-  } catch (err) {
-    showToast(err.message);
-    await refresh();
-  }
-});
+for (const botId of BOT_IDS) {
+  $(`${botId}-startBtn`).addEventListener("click", async () => {
+    try {
+      $(`${botId}-startBtn`).disabled = true;
+      const minutes = Number($(`${botId}-autoStop`).value || 0);
+      const data = await post(`/api/start/${botId}`, { auto_stop_minutes: minutes });
+      showToast(data.message || "Start requested");
+      await refresh();
+    } catch (err) {
+      showToast(err.message);
+      await refresh();
+    }
+  });
 
-stopBtn.addEventListener("click", async () => {
-  if (!confirm("Stop the Telegram bot and end the Kaggle worker run?")) return;
-  try {
-    stopBtn.disabled = true;
-    const data = await post("/api/stop");
-    showToast(data.message || "Stop requested");
-    await refresh();
-  } catch (err) {
-    showToast(err.message);
-    await refresh();
-  }
-});
+  $(`${botId}-stopBtn`).addEventListener("click", async () => {
+    const label = botId === "subtitle" ? "Subtitle bot" : "Encoding bot";
+    if (!confirm(`Stop the ${label} and end its Kaggle worker run?`)) return;
+    try {
+      $(`${botId}-stopBtn`).disabled = true;
+      const data = await post(`/api/stop/${botId}`);
+      showToast(data.message || "Stop requested");
+      await refresh();
+    } catch (err) {
+      showToast(err.message);
+      await refresh();
+    }
+  });
+}
 
 refresh();
 setInterval(refresh, 3000);
